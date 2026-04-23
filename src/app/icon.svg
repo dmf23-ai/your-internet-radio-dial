@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6a4220"/>
+      <stop offset="100%" stop-color="#241208"/>
+    </linearGradient>
+    <radialGradient id="brass" cx="32%" cy="28%" r="80%">
+      <stop offset="0%" stop-color="#ffeac0"/>
+      <stop offset="50%" stop-color="#c9993f"/>
+      <stop offset="100%" stop-color="#3a2410"/>
+    </radialGradient>
+    <radialGradient id="amber" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#ffe3a0"/>
+      <stop offset="75%" stop-color="#d99a4a"/>
+      <stop offset="100%" stop-color="#6a3a12"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Cathedral-radio cabinet: arched top, flat base -->
+  <path d="M 8 60 L 8 26 Q 8 4 32 4 Q 56 4 56 26 L 56 60 Z"
+        fill="url(#wood)" stroke="#0a0502" stroke-width="2"/>
+
+  <!-- Speaker grille: bold horizontal bars in lower half -->
+  <rect x="14" y="38" width="36" height="3" rx="1" fill="#c9993f"/>
+  <rect x="14" y="44" width="36" height="3" rx="1" fill="#c9993f"/>
+  <rect x="14" y="50" width="36" height="3" rx="1" fill="#c9993f"/>
+
+  <!-- Dial at top center: brass bezel, amber face, red needle -->
+  <circle cx="32" cy="22" r="11" fill="url(#brass)" stroke="#0a0502" stroke-width="1.5"/>
+  <circle cx="32" cy="22" r="7.5" fill="url(#amber)" stroke="#3a2010" stroke-width="0.8"/>
+  <rect x="30.8" y="13" width="2.4" height="14" rx="1.2" fill="#e52828"/>
+  <circle cx="32" cy="22" r="1.8" fill="#2a1810"/>
+</svg>
