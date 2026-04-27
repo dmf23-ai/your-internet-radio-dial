@@ -21,6 +21,10 @@ import { NextRequest, NextResponse } from "next/server";
  * blob (same-origin), the Web Audio graph stays untainted → VU meter works.
  */
 export const runtime = "nodejs";
+// Each /api/hls call here is short-lived (a manifest fetch or a single
+// segment), so this mostly matters for segment passthroughs in case Vercel
+// would otherwise truncate a slow segment download. Set to plan max.
+export const maxDuration = 300;
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 

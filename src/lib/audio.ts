@@ -42,7 +42,26 @@ class AudioEngine {
   private listeners = new Set<Listener>();
   private snapshot: AudioSnapshot = { status: "idle", meterAvailable: false };
   private currentUrl = "";
+  private currentType: StreamType = "unknown";
+  private currentCorsOk = true;
   private volume = 0.7;
+
+  // Auto-reconnect state. When the upstream proxy connection is terminated
+  // (typically by Vercel's serverless function timeout, but also any network
+  // hiccup), the audio element fires `ended` or pauses unexpectedly. We then
+  // retry the same URL with backoff, transparent to the user. After
+  // MAX_RECONNECTS consecutive failures we surface a real "signal lost"
+  // error so the user knows the station itself is dead, not just transient.
+  private intentPlaying = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Guards the brief window during a station change / reload where we
+  // pause+load the element. Those internal pauses fire `pause` events that
+  // would otherwise be misread as unexpected drops and schedule a bogus
+  // reconnect that fires mid-playback.
+  private inTransition = false;
+  private static readonly RECONNECT_DELAYS_MS = [500, 1500, 4000];
+  private static readonly MAX_RECONNECTS = 3;
 
   // --- public API ---
 
@@ -64,6 +83,16 @@ class AudioEngine {
     corsOk: boolean = true,
   ): Promise<void> {
     this.ensureDom();
+
+    // Cancel any pending reconnect — a fresh play() supersedes it.
+    this.clearReconnectTimer();
+    // Record the playback target so reconnect attempts can re-issue with the
+    // same args without depending on a closure.
+    this.currentType = type;
+    this.currentCorsOk = corsOk;
+    // Mark intent up-front so any synchronous events (e.g. an immediate error
+    // during el.play()) are correctly classified as unexpected.
+    this.intentPlaying = true;
 
     // Decide which element + which URL to play:
     //  - CORS-clean streams → direct URL on corsEl (VU meter enabled).
@@ -101,12 +130,16 @@ class AudioEngine {
         await useEl.play();
         this.setStatus("playing");
       } catch (e: any) {
+        this.intentPlaying = false;
         this.setStatus("error", e?.message ?? "play failed");
       }
       return;
     }
 
-    // New URL (or path switch) — full reload on the chosen element.
+    // New URL (or path switch) — full reload on the chosen element. Mark
+    // transition so the queued pause/emptied/abort events from the cleanup
+    // below don't trigger a spurious reconnect.
+    this.inTransition = true;
     try {
       useEl.pause();
     } catch {}
@@ -151,11 +184,20 @@ class AudioEngine {
       await useEl.play();
       this.setStatus("playing");
     } catch (e: any) {
+      this.intentPlaying = false;
       this.setStatus("error", e?.message ?? "playback failed");
+    } finally {
+      // Clear transition AFTER play() resolves — by this point all queued
+      // cleanup events have run through their (suppressed) handlers.
+      this.inTransition = false;
     }
   }
 
   pause(): void {
+    // User intent: stop listening. Cancel any auto-reconnect first so the
+    // pause event handler (below) doesn't misread this as an unexpected drop.
+    this.intentPlaying = false;
+    this.clearReconnectTimer();
     const el = this.active === "cors" ? this.corsEl : this.nocorsEl;
     if (!el) return;
     try {
@@ -165,6 +207,8 @@ class AudioEngine {
   }
 
   stop(): void {
+    this.intentPlaying = false;
+    this.clearReconnectTimer();
     this.teardownHls();
     for (const el of [this.corsEl, this.nocorsEl]) {
       if (!el) continue;
@@ -225,18 +269,121 @@ class AudioEngine {
       if (this.active === kind) fn();
     };
     el.addEventListener("waiting", when(() => this.setStatus("buffering")));
-    el.addEventListener("playing", when(() => this.setStatus("playing")));
+    el.addEventListener(
+      "playing",
+      when(() => {
+        // Confirmed audio output → reset reconnect counter and cancel any
+        // pending reconnect timer (e.g. one queued from a transition pause
+        // that we couldn't suppress in time).
+        this.reconnectAttempts = 0;
+        this.clearReconnectTimer();
+        this.setStatus("playing");
+      }),
+    );
     el.addEventListener(
       "pause",
       when(() => {
-        if (this.snapshot.status !== "error") this.setStatus("idle");
+        if (this.inTransition) return;
+        if (this.snapshot.status === "error") return;
+        // If the user asked to be playing but the element paused on its own
+        // (Vercel cut the proxy stream, network blip, etc.), treat it as a
+        // drop and try to reconnect transparently.
+        if (this.intentPlaying) {
+          this.scheduleReconnect();
+        } else {
+          this.setStatus("idle");
+        }
+      }),
+    );
+    el.addEventListener(
+      "ended",
+      when(() => {
+        if (this.inTransition) return;
+        // For continuous radio streams, `ended` should never legitimately
+        // fire — it means the response body was closed (Vercel timeout,
+        // upstream disconnect, etc.). Try to reconnect.
+        if (this.intentPlaying) this.scheduleReconnect();
       }),
     );
     el.addEventListener(
       "error",
-      when(() => this.setStatus("error", "audio element error")),
+      when(() => {
+        if (this.inTransition) return;
+        // Decode/network error. If user wants to be playing, give reconnect
+        // a chance — transient errors often recover on a fresh fetch. After
+        // MAX_RECONNECTS, scheduleReconnect itself surfaces "signal lost".
+        if (this.intentPlaying) this.scheduleReconnect();
+        else this.setStatus("error", "audio element error");
+      }),
     );
     el.addEventListener("stalled", when(() => this.setStatus("buffering")));
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) return; // already pending
+    if (!this.intentPlaying) return;
+    if (!this.currentUrl) return;
+
+    if (this.reconnectAttempts >= AudioEngine.MAX_RECONNECTS) {
+      // Give up — surface a real error so the lamp turns red.
+      this.intentPlaying = false;
+      this.reconnectAttempts = 0;
+      this.setStatus("error", "signal lost");
+      return;
+    }
+
+    const delay =
+      AudioEngine.RECONNECT_DELAYS_MS[this.reconnectAttempts] ?? 4000;
+    this.reconnectAttempts++;
+    // Show "Tuning…" in the lamp while we retry.
+    this.setStatus("buffering");
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.attemptReload();
+    }, delay);
+  }
+
+  private async attemptReload() {
+    if (!this.intentPlaying) return;
+    const url = this.currentUrl;
+    const type = this.currentType;
+    const corsOk = this.currentCorsOk;
+    if (!url) return;
+
+    const useEl = this.active === "cors" ? this.corsEl : this.nocorsEl;
+    if (useEl) {
+      // Force the play() shortcut path to skip; we want a brand-new fetch,
+      // not a resume on a closed connection. Wrap in inTransition so the
+      // resulting pause/emptied don't recursively re-schedule a reconnect.
+      this.inTransition = true;
+      try {
+        useEl.pause();
+        useEl.removeAttribute("src");
+        useEl.load();
+      } catch {}
+      this.inTransition = false;
+    }
+
+    try {
+      await this.play(url, type, corsOk);
+      // Note: reconnectAttempts is reset by the `playing` event when audio
+      // is actually flowing — not here, since play() resolving doesn't yet
+      // guarantee buffered playback.
+    } catch {
+      // play() already handled status; if it failed in a way that didn't
+      // trigger a reconnect-worthy event, manually re-schedule.
+      if (this.intentPlaying && !this.reconnectTimer) {
+        this.scheduleReconnect();
+      }
+    }
   }
 
   private ensureDom() {

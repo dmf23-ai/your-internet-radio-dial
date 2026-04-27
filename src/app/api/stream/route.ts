@@ -12,6 +12,11 @@ import { NextRequest, NextResponse } from "next/server";
  * rewrite the manifest.
  */
 export const runtime = "nodejs";
+// Maximum streaming duration before Vercel terminates the function. Pro plans
+// honour up to 300s; Hobby caps lower and silently floors this. When the
+// function does get killed, the audio engine's auto-reconnect logic (see
+// src/lib/audio.ts) re-establishes a fresh proxy stream transparently.
+export const maxDuration = 300;
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
