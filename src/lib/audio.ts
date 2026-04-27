@@ -1,17 +1,38 @@
 // Singleton audio engine.
 //
-// Two <audio> elements are maintained side-by-side:
+// Two CORS-clean <audio> elements are maintained side-by-side as parallel
+// "slots". At any moment one slot is active (audible) and the other is
+// either idle or silently pre-warming the next stream connection.
 //
-//   corsEl   — crossOrigin="anonymous"; routed through AudioContext →
-//              AnalyserNode → GainNode → destination. Enables the VU meter.
-//              Requires the stream server to return permissive CORS headers.
+//   slot.el   — HTMLAudioElement, crossOrigin="anonymous"
+//   slot.mes  — MediaElementAudioSourceNode (wired once at context init)
+//   slot.mix  — per-slot GainNode; 1.0 for active slot, 0 for the other
+//   slot.hls  — optional hls.js instance for HLS streams
 //
-//   nocorsEl — no crossOrigin; plays directly with element.volume. Used when
-//              a stream server doesn't return CORS headers (setting
-//              crossOrigin="anonymous" would otherwise make Chrome refuse
-//              to load the media). No analyser / VU metering on this path.
+// Audio graph:
 //
-// HLS streams are handed to hls.js (dynamic import) in either case.
+//   slot[0].el → mes → mix(0|1) ──┐
+//                                  ├→ analyser → masterGain → destination
+//   slot[1].el → mes → mix(1|0) ──┘
+//
+// Why per-slot mix gains: createMediaElementSource can only be called once
+// per element, so both slots must be wired permanently at context init.
+// Switching between them is just a 50ms gain crossfade — no graph rewiring,
+// no audible click. masterGain holds the user's volume independently.
+//
+// CORS: streams whose origin lacks permissive CORS are routed through
+// /api/stream (or /api/hls for HLS). Same-origin proxied responses are
+// CORS-clean, so MediaElementSource is never tainted → VU meter always
+// works.
+//
+// Pre-warm (M11): about 30s before Vercel cuts the active proxy connection
+// (300s timeout, see route.ts files), the inactive slot fetches a fresh
+// connection to the same URL silently. When the active slot drops, we swap
+// to the pre-warmed one with no audible gap.
+//
+// Reconnect fallback (M10): if pre-warm wasn't ready (HLS, transient
+// pre-warm failure, etc.) we fall back to retry-with-backoff on the active
+// slot. SIGNAL LOST surfaces only after MAX_RECONNECTS consecutive failures.
 
 import type { StreamType } from "@/data/seed";
 
@@ -24,44 +45,60 @@ export interface AudioSnapshot {
 }
 
 type Listener = (s: AudioSnapshot) => void;
-type Kind = "cors" | "nocors";
+type SlotIdx = 0 | 1;
+
+interface Slot {
+  el: HTMLAudioElement | null;
+  mes: MediaElementAudioSourceNode | null;
+  mix: GainNode | null;
+  hls: any;
+  // performance.now() at the most recent `playing` event for this slot.
+  // Used to compute when this slot's proxy connection is likely to be cut,
+  // so post-swap pre-warm rescheduling is accurate.
+  startedAt: number;
+}
 
 class AudioEngine {
-  private corsEl: HTMLAudioElement | null = null;
-  private nocorsEl: HTMLAudioElement | null = null;
-  private active: Kind = "cors";
+  private slots: [Slot, Slot] = [
+    { el: null, mes: null, mix: null, hls: null, startedAt: 0 },
+    { el: null, mes: null, mix: null, hls: null, startedAt: 0 },
+  ];
+  private activeIdx: SlotIdx = 0;
 
   private ctx: AudioContext | null = null;
-  private source: MediaElementAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
-  private gain: GainNode | null = null;
-
-  private hls: any = null;
+  private masterGain: GainNode | null = null;
   private timeBuf: Uint8Array<ArrayBuffer> | null = null;
 
   private listeners = new Set<Listener>();
   private snapshot: AudioSnapshot = { status: "idle", meterAvailable: false };
-  private currentUrl = "";
+
+  private currentUrl = ""; // upstream URL the caller passed
+  private currentPlayUrl = ""; // resolved URL (proxied if needed) — what we hand to <audio>
   private currentType: StreamType = "unknown";
   private currentCorsOk = true;
+  private currentIsHls = false;
   private volume = 0.7;
 
-  // Auto-reconnect state. When the upstream proxy connection is terminated
-  // (typically by Vercel's serverless function timeout, but also any network
-  // hiccup), the audio element fires `ended` or pauses unexpectedly. We then
-  // retry the same URL with backoff, transparent to the user. After
-  // MAX_RECONNECTS consecutive failures we surface a real "signal lost"
-  // error so the user knows the station itself is dead, not just transient.
+  // M10 reconnect state.
   private intentPlaying = false;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  // Guards the brief window during a station change / reload where we
-  // pause+load the element. Those internal pauses fire `pause` events that
-  // would otherwise be misread as unexpected drops and schedule a bogus
-  // reconnect that fires mid-playback.
+  // Suppresses spurious reconnect/swap during the brief window where we
+  // pause+load an element as part of an intentional transition (station
+  // change, manual reload, post-swap cleanup).
   private inTransition = false;
   private static readonly RECONNECT_DELAYS_MS = [500, 1500, 4000];
   private static readonly MAX_RECONNECTS = 3;
+
+  // M11 pre-warm state.
+  // Vercel Pro plans cap serverless function duration at 300s. We pre-warm
+  // 270s after the active slot's `playing` event — 30s before the expected
+  // cut, leaving comfortable buffer headroom.
+  private prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+  private prewarmActive = false;
+  private static readonly PREWARM_DELAY_MS = 270_000;
+  private static readonly SWAP_RAMP_S = 0.05;
 
   // --- public API ---
 
@@ -84,50 +121,48 @@ class AudioEngine {
   ): Promise<void> {
     this.ensureDom();
 
-    // Cancel any pending reconnect — a fresh play() supersedes it.
+    // Cancel any pending reconnect/pre-warm — a fresh play() supersedes them.
     this.clearReconnectTimer();
-    // Record the playback target so reconnect attempts can re-issue with the
-    // same args without depending on a closure.
+    this.clearPrewarmTimer();
+    this.prewarmActive = false;
+
     this.currentType = type;
     this.currentCorsOk = corsOk;
     // Mark intent up-front so any synchronous events (e.g. an immediate error
     // during el.play()) are correctly classified as unexpected.
     this.intentPlaying = true;
 
-    // Decide which element + which URL to play:
-    //  - CORS-clean streams → direct URL on corsEl (VU meter enabled).
-    //  - Non-CORS, non-HLS → route through /api/stream (same-origin) on
-    //    corsEl. Same-origin ⇒ no MediaElementSource taint ⇒ meter works.
-    //  - Non-CORS HLS → route through /api/hls (manifest-rewriting proxy)
-    //    on corsEl. hls.js fetches a same-origin manifest + segments and
-    //    feeds MSE, so the media element stays untainted ⇒ meter works.
     const isHls = type === "hls" || /\.m3u8(\?|$)/i.test(url);
+    this.currentIsHls = isHls;
+
     const useProxy = !corsOk;
     const playUrl = useProxy
       ? isHls
         ? `/api/hls?url=${encodeURIComponent(url)}`
         : `/api/stream?url=${encodeURIComponent(url)}`
       : url;
+    this.currentPlayUrl = playUrl;
 
-    const nextKind: Kind = corsOk || useProxy ? "cors" : "nocors";
-    const useEl = nextKind === "cors" ? this.corsEl! : this.nocorsEl!;
-    const otherEl = nextKind === "cors" ? this.nocorsEl! : this.corsEl!;
+    const activeIdx = this.activeIdx;
+    const otherIdx = (activeIdx === 0 ? 1 : 0) as SlotIdx;
+    const activeSlot = this.slots[activeIdx];
+    const otherSlot = this.slots[otherIdx];
+    if (!activeSlot.el || !otherSlot.el) return;
 
-    // Pause & unload the element we aren't using so we only emit one stream.
+    // Tear down any HLS instances and clear the OTHER slot — only one stream
+    // should be emitting until pre-warm fires later.
     this.teardownHls();
     try {
-      otherEl.pause();
-      otherEl.removeAttribute("src");
-      otherEl.load();
+      otherSlot.el.pause();
+      otherSlot.el.removeAttribute("src");
+      otherSlot.el.load();
     } catch {}
 
-    // Same URL on the same path → just resume. We key on the upstream url
-    // (what the caller passed), not playUrl, so proxy wrappers don't confuse
-    // the cache check.
-    if (url === this.currentUrl && useEl.src && this.active === nextKind) {
+    // Same URL → just resume on the active slot.
+    if (url === this.currentUrl && activeSlot.el.src) {
       try {
-        if (nextKind === "cors") await this.ensureContext();
-        await useEl.play();
+        await this.ensureContext();
+        await activeSlot.el.play();
         this.setStatus("playing");
       } catch (e: any) {
         this.intentPlaying = false;
@@ -136,22 +171,21 @@ class AudioEngine {
       return;
     }
 
-    // New URL (or path switch) — full reload on the chosen element. Mark
-    // transition so the queued pause/emptied/abort events from the cleanup
-    // below don't trigger a spurious reconnect.
+    // New URL — full reload on the active slot. inTransition suppresses the
+    // queued pause/emptied/abort events that would otherwise be misread as
+    // an unexpected drop.
     this.inTransition = true;
     try {
-      useEl.pause();
+      activeSlot.el.pause();
     } catch {}
-    useEl.removeAttribute("src");
-    useEl.load();
+    activeSlot.el.removeAttribute("src");
+    activeSlot.el.load();
 
-    this.active = nextKind;
     this.currentUrl = url;
     this.setStatus("buffering");
 
     try {
-      if (isHls && !useEl.canPlayType("application/vnd.apple.mpegurl")) {
+      if (isHls && !activeSlot.el.canPlayType("application/vnd.apple.mpegurl")) {
         const mod: any = await import("hls.js").catch(() => null);
         const Hls = mod?.default ?? mod?.Hls ?? mod;
         if (!Hls || !Hls.isSupported?.()) {
@@ -161,64 +195,75 @@ class AudioEngine {
           );
           return;
         }
-        this.hls = new Hls({ enableWorker: true });
-        // HLS is never routed through /api/stream right now.
-        this.hls.loadSource(playUrl);
-        this.hls.attachMedia(useEl);
+        activeSlot.hls = new Hls({ enableWorker: true });
+        activeSlot.hls.loadSource(playUrl);
+        activeSlot.hls.attachMedia(activeSlot.el);
       } else {
-        useEl.src = playUrl;
+        activeSlot.el.src = playUrl;
       }
 
-      if (nextKind === "cors") {
-        await this.ensureContext();
-      } else {
-        // no-CORS path: skip the graph entirely; use element volume.
-        useEl.volume = this.volume * this.volume;
+      await this.ensureContext();
+
+      // Make sure the active slot is the one that's audible.
+      if (this.ctx && activeSlot.mix && otherSlot.mix) {
+        const t = this.ctx.currentTime;
+        activeSlot.mix.gain.cancelScheduledValues(t);
+        otherSlot.mix.gain.cancelScheduledValues(t);
+        activeSlot.mix.gain.setValueAtTime(1, t);
+        otherSlot.mix.gain.setValueAtTime(0, t);
       }
 
-      // Reflect meter availability for the active path.
-      const meterAvailable = nextKind === "cors" && !!this.analyser;
+      const meterAvailable = !!this.analyser;
       this.snapshot = { ...this.snapshot, meterAvailable };
       this.emit();
 
-      await useEl.play();
+      await activeSlot.el.play();
       this.setStatus("playing");
+      // Pre-warm gets scheduled inside the `playing` event handler once we
+      // know audio is actually flowing.
     } catch (e: any) {
       this.intentPlaying = false;
       this.setStatus("error", e?.message ?? "playback failed");
     } finally {
-      // Clear transition AFTER play() resolves — by this point all queued
-      // cleanup events have run through their (suppressed) handlers.
       this.inTransition = false;
     }
   }
 
   pause(): void {
-    // User intent: stop listening. Cancel any auto-reconnect first so the
-    // pause event handler (below) doesn't misread this as an unexpected drop.
+    // User intent: stop listening. Cancel reconnect and pre-warm so their
+    // event handlers don't misread the resulting pauses as unexpected drops.
     this.intentPlaying = false;
     this.clearReconnectTimer();
-    const el = this.active === "cors" ? this.corsEl : this.nocorsEl;
-    if (!el) return;
-    try {
-      el.pause();
-      this.setStatus("idle");
-    } catch {}
+    this.clearPrewarmTimer();
+    this.prewarmActive = false;
+    // Pause both slots — pre-warm may be silently buffering on the inactive
+    // one and we don't want it churning a connection in the background.
+    for (const slot of this.slots) {
+      if (slot.el) {
+        try {
+          slot.el.pause();
+        } catch {}
+      }
+    }
+    this.setStatus("idle");
   }
 
   stop(): void {
     this.intentPlaying = false;
     this.clearReconnectTimer();
+    this.clearPrewarmTimer();
+    this.prewarmActive = false;
     this.teardownHls();
-    for (const el of [this.corsEl, this.nocorsEl]) {
-      if (!el) continue;
+    for (const slot of this.slots) {
+      if (!slot.el) continue;
       try {
-        el.pause();
-        el.removeAttribute("src");
-        el.load();
+        slot.el.pause();
+        slot.el.removeAttribute("src");
+        slot.el.load();
       } catch {}
     }
     this.currentUrl = "";
+    this.currentPlayUrl = "";
     this.setStatus("idle");
   }
 
@@ -226,24 +271,25 @@ class AudioEngine {
     const clamped = Math.min(1, Math.max(0, v));
     this.volume = clamped;
     const out = clamped * clamped; // curved — more natural to the ear
-    // CORS path via gain node (if context has been initialised).
-    if (this.gain && this.ctx) {
-      this.gain.gain.setTargetAtTime(out, this.ctx.currentTime, 0.01);
-    } else if (this.corsEl) {
-      // Fallback before context exists.
-      this.corsEl.volume = out;
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.setTargetAtTime(out, this.ctx.currentTime, 0.01);
+    } else {
+      // Fallback before context exists. Once the graph is up, masterGain
+      // takes over and element volume is reset to 1 (see ensureContext).
+      for (const slot of this.slots) {
+        if (slot.el) slot.el.volume = out;
+      }
     }
-    // No-CORS path always uses element volume.
-    if (this.nocorsEl) this.nocorsEl.volume = out;
   }
 
   getVolume(): number {
     return this.volume;
   }
 
-  // RMS of current analyser window, 0..1. Only the CORS path has a meter.
+  // RMS of current analyser window, 0..1. The analyser sits downstream of
+  // both slot mixes, so it always reflects whatever's audible — no special
+  // case needed at swap time.
   getRms(): number {
-    if (this.active !== "cors") return 0;
     if (!this.analyser || !this.timeBuf) return 0;
     try {
       this.analyser.getByteTimeDomainData(this.timeBuf);
@@ -261,68 +307,214 @@ class AudioEngine {
 
   // --- internals ---
 
-  private wireEvents(el: HTMLAudioElement, kind: Kind) {
-    // Only fire status updates for the currently-active element. The other
-    // element may be idling with no src; we don't want its events flipping
-    // global status.
-    const when = (fn: () => void) => () => {
-      if (this.active === kind) fn();
-    };
-    el.addEventListener("waiting", when(() => this.setStatus("buffering")));
-    el.addEventListener(
-      "playing",
-      when(() => {
+  private wireEvents(el: HTMLAudioElement, idx: SlotIdx) {
+    el.addEventListener("waiting", () => {
+      if (this.activeIdx === idx) this.setStatus("buffering");
+    });
+    el.addEventListener("playing", () => {
+      // Always record start time — needed for both active (pre-warm
+      // scheduling) and pre-warm slot (post-swap reschedule).
+      this.slots[idx].startedAt = performance.now();
+      if (this.activeIdx === idx) {
         // Confirmed audio output → reset reconnect counter and cancel any
-        // pending reconnect timer (e.g. one queued from a transition pause
-        // that we couldn't suppress in time).
+        // pending reconnect timer.
         this.reconnectAttempts = 0;
         this.clearReconnectTimer();
         this.setStatus("playing");
-      }),
-    );
-    el.addEventListener(
-      "pause",
-      when(() => {
-        if (this.inTransition) return;
-        if (this.snapshot.status === "error") return;
-        // If the user asked to be playing but the element paused on its own
-        // (Vercel cut the proxy stream, network blip, etc.), treat it as a
-        // drop and try to reconnect transparently.
-        if (this.intentPlaying) {
-          this.scheduleReconnect();
-        } else {
-          this.setStatus("idle");
-        }
-      }),
-    );
-    el.addEventListener(
-      "ended",
-      when(() => {
-        if (this.inTransition) return;
-        // For continuous radio streams, `ended` should never legitimately
-        // fire — it means the response body was closed (Vercel timeout,
-        // upstream disconnect, etc.). Try to reconnect.
-        if (this.intentPlaying) this.scheduleReconnect();
-      }),
-    );
-    el.addEventListener(
-      "error",
-      when(() => {
-        if (this.inTransition) return;
-        // Decode/network error. If user wants to be playing, give reconnect
-        // a chance — transient errors often recover on a fresh fetch. After
-        // MAX_RECONNECTS, scheduleReconnect itself surfaces "signal lost".
-        if (this.intentPlaying) this.scheduleReconnect();
-        else this.setStatus("error", "audio element error");
-      }),
-    );
-    el.addEventListener("stalled", when(() => this.setStatus("buffering")));
+        // Arm the pre-warm for ~30s before the expected Vercel cut.
+        this.schedulePrewarm();
+      }
+    });
+    el.addEventListener("pause", () => {
+      if (this.inTransition) return;
+      if (this.activeIdx !== idx) {
+        // Pre-warm slot paused on its own (proxy died early?). Mark backup
+        // unavailable; if active drops before the next pre-warm fires we'll
+        // fall back to M10 reconnect.
+        this.prewarmActive = false;
+        return;
+      }
+      if (this.snapshot.status === "error") return;
+      if (this.intentPlaying) {
+        this.tryFailoverOrReconnect();
+      } else {
+        this.setStatus("idle");
+      }
+    });
+    el.addEventListener("ended", () => {
+      if (this.inTransition) return;
+      if (this.activeIdx !== idx) {
+        // Pre-warm proxy connection ended before swap. Re-arm in 5s.
+        this.prewarmActive = false;
+        this.clearPrewarmTimer();
+        this.prewarmTimer = setTimeout(() => {
+          this.prewarmTimer = null;
+          this.startPrewarm();
+        }, 5000);
+        return;
+      }
+      // For continuous radio, `ended` should never legitimately fire — it
+      // means the response body closed (Vercel timeout, upstream disconnect).
+      if (this.intentPlaying) this.tryFailoverOrReconnect();
+    });
+    el.addEventListener("error", () => {
+      if (this.inTransition) return;
+      if (this.activeIdx !== idx) {
+        this.prewarmActive = false;
+        return;
+      }
+      if (this.intentPlaying) this.tryFailoverOrReconnect();
+      else this.setStatus("error", "audio element error");
+    });
+    el.addEventListener("stalled", () => {
+      if (this.activeIdx === idx) this.setStatus("buffering");
+    });
   }
 
   private clearReconnectTimer() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private clearPrewarmTimer() {
+    if (this.prewarmTimer) {
+      clearTimeout(this.prewarmTimer);
+      this.prewarmTimer = null;
+    }
+  }
+
+  // Decide whether to swap to the pre-warmed slot or fall back to retry.
+  private tryFailoverOrReconnect() {
+    if (!this.intentPlaying) return;
+    if (this.canSwap()) {
+      this.swapToBackup();
+      return;
+    }
+    this.scheduleReconnect();
+  }
+
+  private canSwap(): boolean {
+    if (this.currentIsHls) return false; // HLS isn't pre-warmed in MVP
+    if (!this.prewarmActive) return false;
+    const otherIdx = (this.activeIdx === 0 ? 1 : 0) as SlotIdx;
+    const slot = this.slots[otherIdx];
+    if (!slot.el) return false;
+    // readyState >= HAVE_CURRENT_DATA (2) means at least one frame is ready
+    // to play. paused/ended would mean the backup isn't actually rolling.
+    if (slot.el.readyState < 2) return false;
+    if (slot.el.paused) return false;
+    if (slot.el.ended) return false;
+    return true;
+  }
+
+  private swapToBackup() {
+    if (!this.ctx) return;
+    const oldIdx = this.activeIdx;
+    const newIdx = (oldIdx === 0 ? 1 : 0) as SlotIdx;
+    const oldSlot = this.slots[oldIdx];
+    const newSlot = this.slots[newIdx];
+    if (!newSlot.mix || !oldSlot.mix) return;
+
+    const t = this.ctx.currentTime;
+    const ramp = AudioEngine.SWAP_RAMP_S;
+    // Brief crossfade on the per-slot mix gains. masterGain (volume) is
+    // unchanged, so audible level is preserved.
+    newSlot.mix.gain.cancelScheduledValues(t);
+    oldSlot.mix.gain.cancelScheduledValues(t);
+    newSlot.mix.gain.setValueAtTime(newSlot.mix.gain.value, t);
+    oldSlot.mix.gain.setValueAtTime(oldSlot.mix.gain.value, t);
+    newSlot.mix.gain.linearRampToValueAtTime(1, t + ramp);
+    oldSlot.mix.gain.linearRampToValueAtTime(0, t + ramp);
+
+    this.activeIdx = newIdx;
+    this.prewarmActive = false;
+
+    // Tear down the old slot's now-dead connection so we don't leave a
+    // zombie audio element churning. inTransition suppresses the resulting
+    // pause/emptied events.
+    this.inTransition = true;
+    try {
+      if (oldSlot.hls) {
+        try {
+          oldSlot.hls.destroy();
+        } catch {}
+        oldSlot.hls = null;
+      }
+      oldSlot.el?.pause();
+      oldSlot.el?.removeAttribute("src");
+      oldSlot.el?.load();
+    } catch {}
+    this.inTransition = false;
+
+    // Active is now newSlot — reschedule pre-warm based on its startedAt.
+    this.reconnectAttempts = 0;
+    this.clearReconnectTimer();
+    this.setStatus("playing");
+    this.schedulePrewarm();
+    console.log(
+      `[audio] swapped to slot ${newIdx} (pre-warmed) — no audible gap`,
+    );
+  }
+
+  private schedulePrewarm() {
+    if (this.currentIsHls) return; // not implemented for HLS
+    if (!this.intentPlaying) return;
+    if (!this.currentPlayUrl) return;
+    this.clearPrewarmTimer();
+
+    const active = this.slots[this.activeIdx];
+    const elapsed =
+      active.startedAt > 0 ? performance.now() - active.startedAt : 0;
+    // If we've already burned past the pre-warm window (e.g. swap happened
+    // very late), fire essentially immediately.
+    const remaining = AudioEngine.PREWARM_DELAY_MS - elapsed;
+    const delay = Math.max(remaining, 0);
+
+    this.prewarmTimer = setTimeout(() => {
+      this.prewarmTimer = null;
+      this.startPrewarm();
+    }, delay);
+  }
+
+  private startPrewarm() {
+    if (this.currentIsHls) return;
+    if (!this.intentPlaying) return;
+    if (!this.currentPlayUrl) return;
+
+    const otherIdx = (this.activeIdx === 0 ? 1 : 0) as SlotIdx;
+    const slot = this.slots[otherIdx];
+    if (!slot.el || !slot.mix) return;
+    // Backup mix should already be 0 from prior state. Make extra sure so
+    // the buffering doesn't bleed through audibly.
+    if (this.ctx) {
+      slot.mix.gain.cancelScheduledValues(this.ctx.currentTime);
+      slot.mix.gain.setValueAtTime(0, this.ctx.currentTime);
+    }
+
+    try {
+      slot.el.pause();
+      slot.el.removeAttribute("src");
+      slot.el.load();
+      slot.el.src = this.currentPlayUrl;
+      this.prewarmActive = true;
+      const p = slot.el.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(() => {
+          // Pre-warm failed to start. Re-arm in 5s — the proxy might be
+          // transiently unavailable. If active drops first we just reconnect.
+          this.prewarmActive = false;
+          this.clearPrewarmTimer();
+          this.prewarmTimer = setTimeout(() => {
+            this.prewarmTimer = null;
+            this.startPrewarm();
+          }, 5000);
+        });
+      }
+      console.log(`[audio] pre-warming slot ${otherIdx} (silent)`);
+    } catch {
+      this.prewarmActive = false;
     }
   }
 
@@ -342,7 +534,6 @@ class AudioEngine {
     const delay =
       AudioEngine.RECONNECT_DELAYS_MS[this.reconnectAttempts] ?? 4000;
     this.reconnectAttempts++;
-    // Show "Tuning…" in the lamp while we retry.
     this.setStatus("buffering");
 
     this.reconnectTimer = setTimeout(() => {
@@ -358,28 +549,22 @@ class AudioEngine {
     const corsOk = this.currentCorsOk;
     if (!url) return;
 
-    const useEl = this.active === "cors" ? this.corsEl : this.nocorsEl;
-    if (useEl) {
-      // Force the play() shortcut path to skip; we want a brand-new fetch,
-      // not a resume on a closed connection. Wrap in inTransition so the
-      // resulting pause/emptied don't recursively re-schedule a reconnect.
+    const slot = this.slots[this.activeIdx];
+    if (slot.el) {
+      // Force play()'s same-URL shortcut to skip; we want a fresh fetch on
+      // the active slot, not a resume on a closed connection.
       this.inTransition = true;
       try {
-        useEl.pause();
-        useEl.removeAttribute("src");
-        useEl.load();
+        slot.el.pause();
+        slot.el.removeAttribute("src");
+        slot.el.load();
       } catch {}
       this.inTransition = false;
     }
 
     try {
       await this.play(url, type, corsOk);
-      // Note: reconnectAttempts is reset by the `playing` event when audio
-      // is actually flowing — not here, since play() resolving doesn't yet
-      // guarantee buffered playback.
     } catch {
-      // play() already handled status; if it failed in a way that didn't
-      // trigger a reconnect-worthy event, manually re-schedule.
       if (this.intentPlaying && !this.reconnectTimer) {
         this.scheduleReconnect();
       }
@@ -388,49 +573,63 @@ class AudioEngine {
 
   private ensureDom() {
     if (typeof document === "undefined") return;
-    if (!this.corsEl) {
-      const el = document.createElement("audio");
-      el.crossOrigin = "anonymous";
-      el.preload = "none";
-      (el as any).playsInline = true;
-      el.setAttribute("playsinline", "");
-      this.wireEvents(el, "cors");
-      document.body.appendChild(el);
-      this.corsEl = el;
-    }
-    if (!this.nocorsEl) {
-      const el = document.createElement("audio");
-      // No crossOrigin: browser plays media without requiring CORS headers.
-      el.preload = "none";
-      (el as any).playsInline = true;
-      el.setAttribute("playsinline", "");
-      this.wireEvents(el, "nocors");
-      document.body.appendChild(el);
-      this.nocorsEl = el;
+    for (let i = 0; i < 2; i++) {
+      const idx = i as SlotIdx;
+      const slot = this.slots[idx];
+      if (!slot.el) {
+        const el = document.createElement("audio");
+        el.crossOrigin = "anonymous";
+        el.preload = "none";
+        (el as any).playsInline = true;
+        el.setAttribute("playsinline", "");
+        this.wireEvents(el, idx);
+        document.body.appendChild(el);
+        slot.el = el;
+      }
     }
   }
 
   private async ensureContext() {
-    if (!this.corsEl) return;
+    if (!this.slots[0].el || !this.slots[1].el) return;
     if (!this.ctx) {
       const Ctor: typeof AudioContext =
         (window as any).AudioContext || (window as any).webkitAudioContext;
       if (!Ctor) return;
       this.ctx = new Ctor();
       try {
-        this.source = this.ctx.createMediaElementSource(this.corsEl);
+        // Wire BOTH slots permanently. createMediaElementSource can only
+        // be called once per element, so lazy wiring would lock us out of
+        // ever using a slot we hadn't initialised at first play.
+        for (let i = 0; i < 2; i++) {
+          const idx = i as SlotIdx;
+          const slot = this.slots[idx];
+          const mes = this.ctx.createMediaElementSource(slot.el!);
+          const mix = this.ctx.createGain();
+          mix.gain.value = idx === this.activeIdx ? 1 : 0;
+          mes.connect(mix);
+          slot.mes = mes;
+          slot.mix = mix;
+        }
         this.analyser = this.ctx.createAnalyser();
         this.analyser.fftSize = 1024;
         this.timeBuf = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
-        this.gain = this.ctx.createGain();
-        this.gain.gain.value = this.volume * this.volume;
-        this.source.connect(this.analyser);
-        this.analyser.connect(this.gain);
-        this.gain.connect(this.ctx.destination);
+        this.masterGain = this.ctx.createGain();
+        this.masterGain.gain.value = this.volume * this.volume;
+        // Both slot mixes feed the shared analyser → masterGain → out chain.
+        this.slots[0].mix!.connect(this.analyser);
+        this.slots[1].mix!.connect(this.analyser);
+        this.analyser.connect(this.masterGain);
+        this.masterGain.connect(this.ctx.destination);
+        // Now that masterGain owns volume, reset element-level volume to 1
+        // so the chain isn't compounding (out * out).
+        for (const slot of this.slots) {
+          if (slot.el) slot.el.volume = 1;
+        }
         this.snapshot = { ...this.snapshot, meterAvailable: true };
         this.emit();
       } catch {
-        // Graph failed — keep meterAvailable false.
+        // Graph failed — keep meterAvailable false. Audio still plays
+        // (element volume), but VU meter and pre-warm swap won't work.
         this.snapshot = { ...this.snapshot, meterAvailable: false };
         this.emit();
       }
@@ -443,11 +642,13 @@ class AudioEngine {
   }
 
   private teardownHls() {
-    if (this.hls) {
-      try {
-        this.hls.destroy();
-      } catch {}
-      this.hls = null;
+    for (const slot of this.slots) {
+      if (slot.hls) {
+        try {
+          slot.hls.destroy();
+        } catch {}
+        slot.hls = null;
+      }
     }
   }
 
