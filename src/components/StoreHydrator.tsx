@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useRadioStore } from "@/lib/store";
 import {
   ensureAnonSession,
@@ -18,6 +18,11 @@ export default function StoreHydrator({
   const setUser = useRadioStore((s) => s.setUser);
   const applyCloudSnapshot = useRadioStore((s) => s.applyCloudSnapshot);
 
+  // Tracks the uid we currently believe we're acting as. Used by the
+  // auth-change subscriber to detect a true cross-device sign-in (uid
+  // changes) vs an in-place anon→permanent upgrade (uid stays the same).
+  const knownUidRef = useRef<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -31,6 +36,7 @@ export default function StoreHydrator({
       const user = await ensureAnonSession();
       if (cancelled || !user) return;
       setUser(user);
+      knownUidRef.current = user.id;
       // eslint-disable-next-line no-console
       console.log(
         "[supabase] session uid =",
@@ -79,6 +85,9 @@ export default function StoreHydrator({
   //   - email confirmation link → anon user promoted to permanent (same uid,
   //     now has email + isAnonymous:false), UI should flip Account drawer
   //     from "guest" to "signed in" without reload
+  //   - magic-link sign-in (M6) → uid changes from this device's anon to the
+  //     existing permanent uid; we pull cloud and overwrite local state so
+  //     the user's synced library replaces this device's guest library
   //   - sign-out → clears user; next ensureAnonSession (on reload) mints a
   //     fresh anon uid
   //   - token refresh → refreshed user payload, no visible change
@@ -89,17 +98,52 @@ export default function StoreHydrator({
   useEffect(() => {
     const unsubscribe = subscribeToAuthChanges(async (user) => {
       if (user) {
+        const previousUid = knownUidRef.current;
         setUser(user);
+        knownUidRef.current = user.id;
+
+        // True cross-device sign-in: uid changed. Pull the signed-in user's
+        // library from cloud and overwrite this device's local state. The
+        // prior anon uid's local data (and any rows it pushed under that
+        // anon uid) is intentionally discarded — sign-in is overwrite, not
+        // merge.
+        if (previousUid && previousUid !== user.id) {
+          // eslint-disable-next-line no-console
+          console.log(
+            "[sync] auth uid changed",
+            previousUid,
+            "→",
+            user.id,
+            "— pulling cloud snapshot",
+          );
+          const cloud = await pullFromCloud(user.id);
+          if (cloud) {
+            applyCloudSnapshot(cloud);
+            // eslint-disable-next-line no-console
+            console.log(
+              "[sync] applied cloud snapshot:",
+              cloud.stations.length,
+              "stations,",
+              cloud.groups.length,
+              "groups",
+            );
+          }
+        }
         return;
       }
       // Sign-out fired. Mint a fresh anon session so the app keeps working
       // as a guest without requiring a page reload. The new anon uid starts
       // with an empty cloud slate — next schedulePersist will seed it.
       const fresh = await ensureAnonSession();
-      if (fresh) setUser(fresh);
+      if (fresh) {
+        setUser(fresh);
+        knownUidRef.current = fresh.id;
+      } else {
+        knownUidRef.current = null;
+      }
     });
     return unsubscribe;
-  }, [setUser]);
+  }, [setUser, applyCloudSnapshot]);
 
   return <>{children}</>;
 }

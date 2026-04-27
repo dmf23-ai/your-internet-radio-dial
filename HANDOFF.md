@@ -13,7 +13,7 @@
 >
 > Then the rest of this doc. These memory files live at `<workspace>/.auto-memory/` (or at the user's global memory directory if the workspace copy isn't present — `MEMORY.md` lists them).
 
-**Status (2026-04-22):** M1 → M5 shipped. Feature-complete and polished for first public deploy. Full library management in place — user can search radio-browser, add stations, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data). M5 cleared the pre-deploy UX backlog (dial overflow, preset-bar overflow, About overlay, favicon, RADIO/BANDS brass labels, tagline).
+**Status (2026-04-26):** M1 → M6 shipped. Feature-complete and polished for first public deploy. Full library management in place — user can search radio-browser, add stations, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data, magic-link sign-in for cross-device library load). M5 cleared the pre-deploy UX backlog (dial overflow, preset-bar overflow, About overlay, favicon, RADIO/BANDS brass labels, tagline). M6 added cross-device sign-in (overwrite, not merge). Live at https://yourinternetradiodial.net.
 
 ---
 
@@ -28,6 +28,7 @@
 | M3 | `/api/stations` radio-browser proxy, search overlay (add), group editor (rename/reorder/create/delete), station-list drawer (tune/reorder/remove), dense-position invariant on all mutations | `src/app/api/stations/route.ts`, `src/components/SearchOverlay.tsx`, `GroupEditor.tsx`, `StationListDrawer.tsx`, `src/lib/store.ts` |
 | M4 | Supabase schema + RLS, anonymous-by-default auth, write-through dual-sync (IndexedDB + cloud), pull-on-load, email upgrade that preserves uid & data, AccountDrawer + preset-bar person button, auth-change subscription (email confirmation flips Guest → Signed in without reload; sign-out mints fresh anon) | `supabase/schema.sql`, `src/lib/supabase/client.ts`, `src/lib/supabase/sync.ts`, `src/components/StoreHydrator.tsx`, `src/components/AccountDrawer.tsx`, `src/components/PresetBar.tsx` |
 | M5 | Pre-deploy polish: drum-style dial ticker (station overflow), PresetBar edge-fade + drag-scroll + brass arrow-steppers (group overflow), "New Band" brass plaque, A FRUCHTOMANIA PRODUCTION tagline, vertical brass RADIO/BANDS labels, About/How-to overlay with "?" button, cathedral-radio favicon | `src/components/DialWindow.tsx`, `PresetBar.tsx`, `AboutOverlay.tsx`, `VerticalBrassLabel.tsx`, `src/app/icon.svg` |
+| M6 | Cross-device magic-link sign-in. AccountDrawer's anon state has a "new account" / "sign in" mode toggle. Sign-in path uses `signInWithOtp({ shouldCreateUser:false })` so unknown emails get a clear error. StoreHydrator tracks the active uid in a ref and runs `pullFromCloud + applyCloudSnapshot` on auth-change when the uid actually changes (overwrite-not-merge semantics for the device's pre-sign-in guest library) | `src/lib/supabase/client.ts`, `src/components/AccountDrawer.tsx`, `src/components/StoreHydrator.tsx` |
 
 ---
 
@@ -99,11 +100,21 @@ Pre-deploy UX polish. Closed the entire design-dependent backlog in one pass so 
 - **Vertical brass RADIO / BANDS labels.** Flank the dark PresetBar on the walnut, outside the cabinet pill. `<VerticalBrassLabel>` helper stacks upright uppercase letters at 11px / lineHeight 1.35 / letterSpacing 0.1em. Centered via `items-center` on the outer row so labels can overhang the bar naturally.
 - **Favicon.** `src/app/icon.svg` — Next.js App Router auto-serves it. Cathedral-radio silhouette: arched walnut cabinet, brass-bezel amber dial with red needle at top, three brass grille bars. Silhouette-first so it reads at 16×16.
 
+## M6 — shipped
+
+Cross-device sign-in via magic link. Closes the gap from M4 (which assumed one device per account).
+
+- **`signInWithEmail(email)` in `client.ts`** — wraps `signInWithOtp({ email, options: { shouldCreateUser:false, emailRedirectTo: window.location.origin } })`. `shouldCreateUser:false` means an unknown email errors clearly instead of silently creating a fresh user. `emailRedirectTo: window.location.origin` makes the link land back on whichever host (localhost or prod) sent it, so dev and prod both work without code changes — both must be in Supabase → URL Configuration → Redirect URLs.
+- **AccountDrawer mode toggle** — anon state branches on a `mode: "new" | "existing"` flag. Same email field, different submit handler; toggle link at the bottom of the form (`Already have an account? Sign in instead →`). Sign-in copy includes a one-line warning: "Signing in will replace this device's guest library with your synced library."
+- **StoreHydrator uid-change detection** — `knownUidRef` tracks the currently active uid. Auth-change subscriber compares prev vs new uid; on mismatch (only happens for true cross-device sign-in, NOT for the in-place anon→permanent upgrade), it runs `pullFromCloud + applyCloudSnapshot` to overwrite this device's local state with the user's synced library. Orphaned anon-uid rows in cloud are intentionally left behind.
+- **Supabase dashboard step (must do once)** — enable the "Magic Link" email template in Authentication → Email Templates. Edit if needed to match the brand voice. Without this enabled, `signInWithOtp` will return an error.
+
 ## Deferred
 
 - VU meter SSR hydration warning — cosmetic, low priority. Fix by rounding tick coordinates to fixed precision or marking the SVG client-only.
 - Settings menu — `ui.menuOpen` / `setMenuOpen` are still in the store but no consumer. The PresetBar hamburger now opens the station list (M3.4); a new icon could be added for a future settings overlay.
 - ESLint warning: `VUMeter.tsx:113` missing `startDeg` dep in `useEffect`. Non-blocking on Vercel; fix by adding the dep or disabling the rule inline.
+- Orphan-anon-row cleanup — when a user signs in on a fresh device, the local anon uid's cloud rows (just the seed library, pushed by the bootstrap effect) are abandoned. Low priority; could be cleaned up by a Supabase scheduled function that deletes anon-user rows older than N days.
 
 ---
 

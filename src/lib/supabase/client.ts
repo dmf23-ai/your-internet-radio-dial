@@ -151,6 +151,49 @@ export async function upgradeAnonToEmail(email: string): Promise<UpgradeResult> 
 }
 
 /**
+ * Send a magic-link sign-in email to an existing account. Used when a user
+ * has already signed up on another device and wants to load their library
+ * here. `shouldCreateUser:false` makes Supabase return an error if the email
+ * isn't already registered (rather than silently creating a fresh user, which
+ * would defeat the cross-device sign-in intent).
+ *
+ * The link redirects back to the current origin, so dev (localhost) and prod
+ * (custom domain) both work without code changes — both must be listed in
+ * Supabase → Authentication → URL Configuration → Redirect URLs.
+ *
+ * On click, Supabase swaps the current (anon) session for the existing
+ * permanent session. The auth-change subscriber in StoreHydrator detects the
+ * uid change and calls pullFromCloud to overwrite this device's local state
+ * with the user's synced library.
+ */
+export async function signInWithEmail(email: string): Promise<UpgradeResult> {
+  const sb = getSupabase();
+  if (!sb) return { ok: false, error: "Supabase not configured" };
+  const trimmed = email.trim();
+  if (!trimmed) return { ok: false, error: "Email required" };
+
+  const { error } = await sb.auth.signInWithOtp({
+    email: trimmed,
+    options: {
+      shouldCreateUser: false,
+      emailRedirectTo:
+        typeof window !== "undefined" ? window.location.origin : undefined,
+    },
+  });
+  if (error) {
+    // Supabase returns "Signups not allowed for otp" when the email isn't
+    // registered. Translate to a clearer message for the user.
+    const msg =
+      error.message.toLowerCase().includes("signups not allowed") ||
+      error.message.toLowerCase().includes("not found")
+        ? "No account found for that email. Create one with the form above instead."
+        : error.message;
+    return { ok: false, error: msg };
+  }
+  return { ok: true };
+}
+
+/**
  * Ends the current session. After sign-out, the user is fully signed-out —
  * the next ensureAnonSession() call will create a brand-new anonymous user
  * with a fresh uid. Their prior data remains in cloud under the old uid but

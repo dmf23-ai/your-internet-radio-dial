@@ -3,20 +3,27 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRadioStore } from "@/lib/store";
-import { signOut, upgradeAnonToEmail } from "@/lib/supabase/client";
+import {
+  signInWithEmail,
+  signOut,
+  upgradeAnonToEmail,
+} from "@/lib/supabase/client";
 
 /**
  * AccountDrawer — right-edge panel for auth / account actions.
  *
- * Three visual states:
- *   - Anonymous user, no email submitted → email-upgrade form
- *   - Anonymous user, email submitted, awaiting confirmation → "check inbox"
- *   - Permanent (email) user → email + sign-out
+ * Visual states:
+ *   - Anonymous user, "new account" mode → email-upgrade form
+ *   - Anonymous user, "sign in" mode     → magic-link sign-in form
+ *   - Anonymous user, email submitted    → "check inbox" (copy varies by mode)
+ *   - Permanent (email) user             → email + sign-out
  *
  * Reuses StationListDrawer's visual language (dark wood gradient, brass
  * accents, uppercase tracking-wide headings) to blend with the existing
  * drawer family.
  */
+type AuthMode = "new" | "existing";
+
 export default function AccountDrawer() {
   const open = useRadioStore((s) => s.ui.accountOpen);
   const setOpen = useRadioStore((s) => s.setAccountOpen);
@@ -24,10 +31,11 @@ export default function AccountDrawer() {
 
   // Local submit state — pending / sent / error.
   const [email, setEmail] = useState("");
+  const [mode, setMode] = useState<AuthMode>("new");
   const [status, setStatus] = useState<
     | { kind: "idle" }
     | { kind: "sending" }
-    | { kind: "sent"; to: string }
+    | { kind: "sent"; to: string; mode: AuthMode }
     | { kind: "error"; message: string }
   >({ kind: "idle" });
 
@@ -35,6 +43,7 @@ export default function AccountDrawer() {
   useEffect(() => {
     if (!open) {
       setEmail("");
+      setMode("new");
       setStatus({ kind: "idle" });
     }
   }, [open]);
@@ -53,12 +62,21 @@ export default function AccountDrawer() {
     e.preventDefault();
     if (!email.trim() || status.kind === "sending") return;
     setStatus({ kind: "sending" });
-    const result = await upgradeAnonToEmail(email);
+    const result =
+      mode === "new"
+        ? await upgradeAnonToEmail(email)
+        : await signInWithEmail(email);
     if (result.ok) {
-      setStatus({ kind: "sent", to: email.trim() });
+      setStatus({ kind: "sent", to: email.trim(), mode });
     } else {
       setStatus({ kind: "error", message: result.error });
     }
+  }
+
+  function toggleMode() {
+    setMode((m) => (m === "new" ? "existing" : "new"));
+    // Clear any inline error when switching modes — it likely no longer applies.
+    if (status.kind === "error") setStatus({ kind: "idle" });
   }
 
   async function handleSignOut() {
@@ -137,16 +155,18 @@ export default function AccountDrawer() {
               {!user && <PendingState />}
 
               {user && user.isAnonymous && status.kind !== "sent" && (
-                <AnonUpgradeForm
+                <AnonAuthForm
                   email={email}
                   setEmail={setEmail}
+                  mode={mode}
+                  onToggleMode={toggleMode}
                   status={status}
                   onSubmit={handleSubmit}
                 />
               )}
 
               {user && user.isAnonymous && status.kind === "sent" && (
-                <SentState email={status.to} />
+                <SentState email={status.to} mode={status.mode} />
               )}
 
               {user && !user.isAnonymous && (
@@ -173,28 +193,44 @@ function PendingState() {
   );
 }
 
-function AnonUpgradeForm({
+function AnonAuthForm({
   email,
   setEmail,
+  mode,
+  onToggleMode,
   status,
   onSubmit,
 }: {
   email: string;
   setEmail: (v: string) => void;
+  mode: AuthMode;
+  onToggleMode: () => void;
   status:
     | { kind: "idle" }
     | { kind: "sending" }
-    | { kind: "sent"; to: string }
+    | { kind: "sent"; to: string; mode: AuthMode }
     | { kind: "error"; message: string };
   onSubmit: (e: React.FormEvent) => void;
 }) {
   const busy = status.kind === "sending";
+  const isNew = mode === "new";
+
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-4">
       <p className="text-sm leading-relaxed text-brass-300/85">
-        You&apos;re listening as a guest. Your library lives only in this
-        browser. Add an email and we&apos;ll send you a confirmation link —
-        click it and your library will follow you to any device.
+        {isNew ? (
+          <>
+            You&apos;re listening as a guest. Your library lives only in this
+            browser. Add an email and we&apos;ll send you a confirmation
+            link — click it and your library will follow you to any device.
+          </>
+        ) : (
+          <>
+            Already signed up on another device? Enter the same email and
+            we&apos;ll send a sign-in link. Click it on this device to load
+            your synced library.
+          </>
+        )}
       </p>
 
       <label className="flex flex-col gap-1.5">
@@ -232,8 +268,15 @@ function AnonUpgradeForm({
             "inset 0 1px 2px rgba(255,240,200,0.6), 0 2px 3px rgba(0,0,0,0.5)",
         }}
       >
-        {busy ? "Sending…" : "Send confirmation link"}
+        {busy ? "Sending…" : isNew ? "Send confirmation link" : "Send sign-in link"}
       </button>
+
+      {!isNew && (
+        <p className="text-xs leading-relaxed text-brass-300/55">
+          Signing in will replace this device&apos;s guest library with your
+          synced library.
+        </p>
+      )}
 
       {status.kind === "error" && (
         <p
@@ -247,11 +290,23 @@ function AnonUpgradeForm({
           {status.message}
         </p>
       )}
+
+      {/* Mode toggle */}
+      <button
+        type="button"
+        onClick={onToggleMode}
+        disabled={busy}
+        className="self-start text-[11px] tracking-[0.05em] text-brass-300/60 hover:text-brass-300 transition-colors disabled:opacity-50"
+      >
+        {isNew
+          ? "Already have an account? Sign in instead →"
+          : "← New here? Create an account instead"}
+      </button>
     </form>
   );
 }
 
-function SentState({ email }: { email: string }) {
+function SentState({ email, mode }: { email: string; mode: AuthMode }) {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm leading-relaxed text-brass-300/85">
@@ -259,9 +314,19 @@ function SentState({ email }: { email: string }) {
         <span className="text-brass-300 font-display tracking-[0.04em]">
           {email}
         </span>
-        . Click the confirmation link on this device. When you come back,
-        your library will be tied to your email and sync to every device you
-        sign in from.
+        .{" "}
+        {mode === "new" ? (
+          <>
+            Click the confirmation link on this device. When you come back,
+            your library will be tied to your email and sync to every device
+            you sign in from.
+          </>
+        ) : (
+          <>
+            Click the sign-in link on this device. Your synced library will
+            load automatically when you return.
+          </>
+        )}
       </p>
       <p className="text-xs leading-relaxed text-brass-300/55">
         No email? Check spam, or close this panel and try a different address.
