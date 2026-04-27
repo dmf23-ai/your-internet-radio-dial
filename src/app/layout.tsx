@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Cormorant_Garamond, Inter, DM_Serif_Display } from "next/font/google";
 import "./globals.css";
 import StoreHydrator from "@/components/StoreHydrator";
+import RotateOverlay from "@/components/RotateOverlay";
 
 const display = Cormorant_Garamond({
   subsets: ["latin"],
@@ -30,6 +31,7 @@ export default function RootLayout({
     <html lang="en" className={`${display.variable} ${sans.variable} ${numerals.variable}`}>
       <body className="font-sans text-ivory-dial antialiased">
         <StoreHydrator>{children}</StoreHydrator>
+        <RotateOverlay />
       </body>
     </html>
   );
