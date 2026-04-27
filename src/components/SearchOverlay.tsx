@@ -6,15 +6,17 @@ import { useRadioStore } from "@/lib/store";
 import type { Station, StreamType } from "@/data/seed";
 
 /**
- * SearchOverlay — full-screen modal for finding stations via /api/stations
- * (radio-browser.info proxy) and adding them to the currently active group.
+ * SearchOverlay — full-screen modal for adding stations to the currently
+ * active group, in two modes:
  *
- * Flow:
- *  - setSearchOpen(true) mounts / un-hides the overlay
- *  - input is debounced (300 ms). Enter triggers immediate search.
- *  - "Add" button inserts the station into the active group and marks the
- *    row as Added without closing the overlay (user can keep searching).
- *  - ESC or backdrop click closes.
+ *  - "search": query /api/stations (radio-browser.info proxy), debounced
+ *    300 ms, Add button inserts and marks the row as Added without closing.
+ *  - "url":    paste a direct stream URL + a name. Validates the URL,
+ *    infers streamType from extension, and inserts with corsOk:false so it
+ *    routes through the /api/stream or /api/hls proxy (always works
+ *    same-origin, slight latency cost).
+ *
+ * ESC or backdrop click closes.
  */
 
 type ApiStation = {
@@ -69,6 +71,22 @@ function apiToStation(s: ApiStation): Station {
   };
 }
 
+/**
+ * Best-effort stream-type detection from a URL alone. The audio engine
+ * tolerates "unknown" by letting the audio element sniff content-type, so
+ * we only commit to a specific value when the URL is unambiguous.
+ */
+function inferStreamTypeFromUrl(rawUrl: string): StreamType {
+  const path = rawUrl.toLowerCase().split("?")[0].split("#")[0];
+  if (path.endsWith(".m3u8") || path.includes("/hls/")) return "hls";
+  if (path.endsWith(".mp3")) return "mp3";
+  if (path.endsWith(".aac") || path.endsWith(".aacp")) return "aac";
+  if (path.endsWith(".ogg") || path.endsWith(".oga")) return "ogg";
+  return "unknown";
+}
+
+type AddMode = "search" | "url";
+
 export default function SearchOverlay() {
   const searchOpen = useRadioStore((s) => s.ui.searchOpen);
   const setSearchOpen = useRadioStore((s) => s.setSearchOpen);
@@ -93,26 +111,50 @@ export default function SearchOverlay() {
     }),
   );
 
+  const [mode, setMode] = useState<AddMode>("search");
+
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<ApiStation[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
 
+  // URL-mode form state.
+  const [urlInput, setUrlInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const [urlError, setUrlError] = useState<string | null>(null);
+  const [urlJustAdded, setUrlJustAdded] = useState<string | null>(null);
+
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const urlFieldRef = useRef<HTMLInputElement | null>(null);
   const acRef = useRef<AbortController | null>(null);
 
-  // Reset state when the overlay is opened, and focus the input.
+  // Reset state when the overlay is opened, and focus the right input.
   useEffect(() => {
     if (!searchOpen) return;
+    setMode("search");
     setQuery("");
     setResults([]);
     setError(null);
     setAddedIds(new Set());
+    setUrlInput("");
+    setNameInput("");
+    setUrlError(null);
+    setUrlJustAdded(null);
     // Next frame — ensures the input is mounted before we focus it.
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
   }, [searchOpen]);
+
+  // Refocus when switching modes so the user lands in the right field.
+  useEffect(() => {
+    if (!searchOpen) return;
+    const id = requestAnimationFrame(() => {
+      if (mode === "search") inputRef.current?.focus();
+      else urlFieldRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [mode, searchOpen]);
 
   // Close on ESC.
   useEffect(() => {
@@ -196,6 +238,68 @@ export default function SearchOverlay() {
     }
   }
 
+  function handleAddByUrl(e: React.FormEvent) {
+    e.preventDefault();
+    setUrlError(null);
+    setUrlJustAdded(null);
+
+    const trimmedUrl = urlInput.trim();
+    const trimmedName = nameInput.trim();
+    if (!trimmedUrl || !trimmedName) {
+      setUrlError("Both the stream URL and a station name are required.");
+      return;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmedUrl);
+    } catch {
+      setUrlError("That doesn't look like a valid URL.");
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      setUrlError("Stream URL must start with http:// or https://");
+      return;
+    }
+
+    if (!activeGroupId) {
+      setUrlError("No active band — pick one before adding.");
+      return;
+    }
+
+    // Already in this band (URL match)? Tell the user; don't double-insert.
+    if (activeGroupStreamUrls.has(trimmedUrl)) {
+      setUrlError("That URL is already in this band.");
+      return;
+    }
+
+    const newStation: Station = {
+      // Stable-ish id; addStationToGroup dedups by streamUrl anyway, so a
+      // collision with an existing station in another band reuses that one.
+      id: `url-${
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : Date.now().toString(36) + Math.random().toString(36).slice(2)
+      }`,
+      name: trimmedName,
+      streamUrl: trimmedUrl,
+      streamType: inferStreamTypeFromUrl(trimmedUrl),
+      isPreset: false,
+      corsOk: false,
+    };
+
+    const added = addStationToGroup(newStation, activeGroupId);
+    if (added) {
+      setUrlJustAdded(trimmedName);
+      setUrlInput("");
+      setNameInput("");
+      // Keep focus in the URL field so the user can paste another.
+      requestAnimationFrame(() => urlFieldRef.current?.focus());
+    } else {
+      setUrlError("That station is already in this band.");
+    }
+  }
+
   const statusLine = useMemo(() => {
     const q = query.trim();
     if (q.length === 0) return "Type a station name to search";
@@ -229,7 +333,7 @@ export default function SearchOverlay() {
           {/* Header */}
           <div className="flex items-center justify-between px-4 pt-4 pb-2">
             <h2 className="font-display uppercase tracking-[0.22em] text-sm text-brass-300">
-              Find a Station
+              Add a Station
             </h2>
             <button
               type="button"
@@ -251,45 +355,237 @@ export default function SearchOverlay() {
             </button>
           </div>
 
-          {/* Input */}
-          <div className="px-4">
-            <input
-              ref={inputRef}
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. KEXP, jazz, Radio Paradise"
-              className="w-full rounded-md px-3 py-2 text-sm font-sans bg-walnut-800 border border-walnut-600 text-ivory-dial placeholder:text-ivory-soft/40 focus:outline-none focus:border-brass-500"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <div className="mt-2 text-xs tracking-[0.1em] uppercase text-brass-300/80">
-              {statusLine}
-              <span className="ml-2 text-ivory-soft/50 normal-case tracking-normal">
-                Add to <span className="text-brass-300">{activeGroupName}</span>
-              </span>
+          {/* Mode switcher (segmented brass control) */}
+          <div className="px-4 pb-1">
+            <div
+              className="inline-flex rounded-md p-0.5"
+              style={{
+                background: "linear-gradient(180deg, #120a04 0%, #1a0f08 100%)",
+                border: "1px solid rgba(0,0,0,0.65)",
+                boxShadow:
+                  "inset 0 2px 4px rgba(0,0,0,0.6), inset 0 -1px 1px rgba(255,200,140,0.05)",
+              }}
+              role="tablist"
+              aria-label="How to add a station"
+            >
+              <ModeTab
+                active={mode === "search"}
+                onClick={() => setMode("search")}
+                label="Search Directory"
+              />
+              <ModeTab
+                active={mode === "url"}
+                onClick={() => setMode("url")}
+                label="By URL"
+              />
             </div>
           </div>
 
-          {/* Results list */}
-          <div className="mt-2 overflow-y-auto px-2 pb-3" style={{ minHeight: 60 }}>
-            {results.map((r) => {
-              const added =
-                addedIds.has(r.stationuuid) ||
-                activeGroupStreamUrls.has(r.url_resolved);
-              return (
-                <ResultRow
-                  key={r.stationuuid}
-                  s={r}
-                  added={added}
-                  onAdd={() => handleAdd(r)}
+          {mode === "search" ? (
+            <>
+              {/* Input */}
+              <div className="px-4">
+                <input
+                  ref={inputRef}
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="e.g. KEXP, jazz, Radio Paradise"
+                  className="w-full rounded-md px-3 py-2 text-sm font-sans bg-walnut-800 border border-walnut-600 text-ivory-dial placeholder:text-ivory-soft/40 focus:outline-none focus:border-brass-500"
+                  autoComplete="off"
+                  spellCheck={false}
                 />
-              );
-            })}
-          </div>
+                <div className="mt-2 text-xs tracking-[0.1em] uppercase text-brass-300/80">
+                  {statusLine}
+                  <span className="ml-2 text-ivory-soft/50 normal-case tracking-normal">
+                    Add to{" "}
+                    <span className="text-brass-300">{activeGroupName}</span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Results list */}
+              <div
+                className="mt-2 overflow-y-auto px-2 pb-3"
+                style={{ minHeight: 60 }}
+              >
+                {results.map((r) => {
+                  const added =
+                    addedIds.has(r.stationuuid) ||
+                    activeGroupStreamUrls.has(r.url_resolved);
+                  return (
+                    <ResultRow
+                      key={r.stationuuid}
+                      s={r}
+                      added={added}
+                      onAdd={() => handleAdd(r)}
+                    />
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <UrlAddForm
+              urlRef={urlFieldRef}
+              urlInput={urlInput}
+              setUrlInput={setUrlInput}
+              nameInput={nameInput}
+              setNameInput={setNameInput}
+              urlError={urlError}
+              urlJustAdded={urlJustAdded}
+              activeGroupName={activeGroupName}
+              onSubmit={handleAddByUrl}
+            />
+          )}
         </div>
       </div>
     </div>
+  );
+}
+
+// --- Mode switcher tab ---
+
+function ModeTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className="font-display uppercase tracking-[0.18em] text-[10.5px] rounded px-3 py-1.5 transition-colors"
+      style={
+        active
+          ? {
+              color: "#1a120a",
+              background:
+                "radial-gradient(circle at 30% 20%, #f0d9a8 0%, #b48a49 70%, #8a6a32 100%)",
+              boxShadow:
+                "inset 0 1px 2px rgba(255,240,200,0.6), 0 1px 2px rgba(0,0,0,0.5)",
+            }
+          : {
+              color: "rgba(212,175,116,0.6)",
+              background: "transparent",
+            }
+      }
+    >
+      {label}
+    </button>
+  );
+}
+
+// --- URL add form ---
+
+function UrlAddForm({
+  urlRef,
+  urlInput,
+  setUrlInput,
+  nameInput,
+  setNameInput,
+  urlError,
+  urlJustAdded,
+  activeGroupName,
+  onSubmit,
+}: {
+  urlRef: React.RefObject<HTMLInputElement>;
+  urlInput: string;
+  setUrlInput: (v: string) => void;
+  nameInput: string;
+  setNameInput: (v: string) => void;
+  urlError: string | null;
+  urlJustAdded: string | null;
+  activeGroupName: string;
+  onSubmit: (e: React.FormEvent) => void;
+}) {
+  return (
+    <form onSubmit={onSubmit} className="px-4 pb-4 pt-2 flex flex-col gap-3">
+      <p className="text-xs leading-relaxed text-ivory-soft/70">
+        Have a direct link to an Icecast, Shoutcast, or HLS stream? Paste it
+        below. Will be added to{" "}
+        <span className="text-brass-300">{activeGroupName}</span>.
+      </p>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] tracking-[0.22em] uppercase text-brass-300/70">
+          Stream URL
+        </span>
+        <input
+          ref={urlRef}
+          type="url"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+          placeholder="https://example.com/stream.mp3"
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full rounded-md px-3 py-2 text-sm font-sans bg-walnut-800 border border-walnut-600 text-ivory-dial placeholder:text-ivory-soft/40 focus:outline-none focus:border-brass-500"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] tracking-[0.22em] uppercase text-brass-300/70">
+          Station Name
+        </span>
+        <input
+          type="text"
+          value={nameInput}
+          onChange={(e) => setNameInput(e.target.value)}
+          placeholder="What should it be called on the dial?"
+          autoComplete="off"
+          maxLength={80}
+          className="w-full rounded-md px-3 py-2 text-sm font-sans bg-walnut-800 border border-walnut-600 text-ivory-dial placeholder:text-ivory-soft/40 focus:outline-none focus:border-brass-500"
+        />
+      </label>
+
+      <button
+        type="submit"
+        disabled={!urlInput.trim() || !nameInput.trim()}
+        className="self-start font-display uppercase tracking-[0.2em] text-[11px] rounded-md px-3 py-2 transition-transform active:translate-y-[1px] disabled:opacity-50 disabled:cursor-not-allowed"
+        style={{
+          color: "#1a120a",
+          background:
+            "radial-gradient(circle at 30% 20%, #f0d9a8 0%, #b48a49 70%, #8a6a32 100%)",
+          border: "1px solid rgba(0,0,0,0.7)",
+          boxShadow:
+            "inset 0 1px 2px rgba(255,240,200,0.6), 0 2px 3px rgba(0,0,0,0.5)",
+        }}
+      >
+        Add to band
+      </button>
+
+      {urlError && (
+        <p
+          className="text-xs leading-relaxed px-3 py-2 rounded-md"
+          style={{
+            background: "rgba(80,20,15,0.4)",
+            border: "1px solid rgba(180,50,40,0.35)",
+            color: "#f4b59a",
+          }}
+        >
+          {urlError}
+        </p>
+      )}
+
+      {urlJustAdded && (
+        <p
+          className="text-xs leading-relaxed px-3 py-2 rounded-md"
+          style={{
+            background: "rgba(35,55,25,0.45)",
+            border: "1px solid rgba(140,180,90,0.3)",
+            color: "#cfe6a8",
+          }}
+        >
+          Added <span className="text-brass-300">{urlJustAdded}</span>. Paste
+          another or close this drawer.
+        </p>
+      )}
+    </form>
   );
 }
 
