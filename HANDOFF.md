@@ -9,11 +9,15 @@
 > 5. `.auto-memory/project_m3_milestone.md` — M3 library management (search + groups + drawer)
 > 6. `.auto-memory/project_m4_milestone.md` — M4 Supabase auth + cloud sync
 > 7. `.auto-memory/project_m5_polish_milestone.md` — M5 pre-deploy polish
-> 8. `.auto-memory/project_deploy_checklist.md` — deploy punch list if that's where we are
+> 8. `.auto-memory/project_m6_signin_milestone.md` — M6 magic-link sign-in
+> 9. `.auto-memory/project_m7_rotate_overlay.md` — M7 rotate-to-landscape overlay
+> 10. `.auto-memory/project_m8_url_add_milestone.md` — M8 add-station-by-URL
+> 11. `.auto-memory/project_m9_curated_seed_milestone.md` — M9 curated default library
+> 12. `.auto-memory/project_deploy_checklist.md` — deploy punch list if that's where we are
 >
 > Then the rest of this doc. These memory files live at `<workspace>/.auto-memory/` (or at the user's global memory directory if the workspace copy isn't present — `MEMORY.md` lists them).
 
-**Status (2026-04-26):** M1 → M8 shipped. Live at https://yourinternetradiodial.net. Full library management — search radio-browser, add stations by URL, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data, magic-link sign-in for cross-device library load). M5 cleared the pre-deploy UX backlog (dial overflow, preset-bar overflow, About overlay, favicon, RADIO/BANDS brass labels, tagline). M6 added cross-device sign-in (overwrite, not merge). M7 added a rotate-to-landscape nudge for phones in portrait. M8 added "Add by URL" path inside the search overlay.
+**Status (2026-04-26):** M1 → M9 shipped. Live at https://yourinternetradiodial.net. Full library management — search radio-browser, add stations by URL, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data, magic-link sign-in for cross-device library load). M5 cleared the pre-deploy UX backlog. M6 added cross-device sign-in (overwrite, not merge). M7 added a rotate-to-landscape nudge for phones in portrait. M8 added "Add by URL" path inside the search overlay. M9 replaced the seed with David's curated library (7 bands, 49 stations) so new users land on the curator's collection instead of a generic starter set.
 
 ---
 
@@ -31,6 +35,7 @@
 | M6 | Cross-device magic-link sign-in. AccountDrawer's anon state has a "new account" / "sign in" mode toggle. Sign-in path uses `signInWithOtp({ shouldCreateUser:false })` so unknown emails get a clear error. StoreHydrator tracks the active uid in a ref and runs `pullFromCloud + applyCloudSnapshot` on auth-change when the uid actually changes (overwrite-not-merge semantics for the device's pre-sign-in guest library) | `src/lib/supabase/client.ts`, `src/components/AccountDrawer.tsx`, `src/components/StoreHydrator.tsx` |
 | M7 | Mobile rotate-to-landscape nudge. Full-viewport overlay shows on phones held in portrait — animated phone-rotation icon + brass/walnut styling matching the cabinet. Detection: `(orientation: portrait) and (max-width: 820px) and (pointer: coarse)`. Dismissable per portrait session; resets on orientation change. (Browsers don't permit true orientation lock outside fullscreen, so this is the standard nudge pattern.) | `src/components/RotateOverlay.tsx`, `src/app/layout.tsx` |
 | M8 | Add-station-by-URL. SearchOverlay grew a brass segmented "Search Directory / By URL" tab switcher. URL form: stream URL + station name, validates URL parses with http(s) protocol, infers `streamType` from path extension (.m3u8 → hls, .mp3, .aac, .ogg, else "unknown"), defaults `corsOk:false` so the proxy path is used. Reuses existing URL-based dedup in `addStationToGroup` | `src/components/SearchOverlay.tsx` |
+| M9 | Curated default library. Replaced the bundled 4-band/22-station starter seed with David's personal export (7 bands, 49 stations: Favorites, Austin, Jazz, News/Talk, Ambient/Electronic, Around the World, Exploratorium). New users land on Favorites with WEFUNK preselected. Bumped `CURRENT_VERSION` 9→10 so existing devices invalidate their IndexedDB and re-seed on next load (signed-in users immediately re-pull from cloud) | `src/data/seed.ts`, `src/lib/storage.ts` |
 
 ---
 
@@ -50,7 +55,7 @@
 
 ### `CURRENT_VERSION` in `src/lib/storage.ts`
 
-Invalidates the user's IndexedDB cache on mismatch → forces re-seed. Bump whenever `seed.ts` shape changes so stale cached data doesn't shadow the new seed. Currently `9`.
+Invalidates the user's IndexedDB cache on mismatch → forces re-seed. Bump whenever `seed.ts` shape changes so stale cached data doesn't shadow the new seed. Currently `10`.
 
 ### `/api/hls` manifest rewriting
 

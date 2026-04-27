@@ -15,7 +15,7 @@ export interface UserData {
 }
 
 const KEY = "yird:userData:v1";
-export const CURRENT_VERSION = 9;
+export const CURRENT_VERSION = 10;
 
 export async function loadUserData(): Promise<UserData | null> {
   if (typeof window === "undefined") return null;
