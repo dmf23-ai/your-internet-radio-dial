@@ -30,7 +30,7 @@ export default function VolumeKnob() {
   const labelRadius = 76;
 
   return (
-    <div className="flex flex-col items-center gap-2 select-none">
+    <div className="flex flex-col items-center select-none">
       <div className="relative" style={{ width: 160, height: 160 }}>
         {/* tick dots every 45° from -135 to +135 */}
         {Array.from({ length: 7 }).map((_, i) => {

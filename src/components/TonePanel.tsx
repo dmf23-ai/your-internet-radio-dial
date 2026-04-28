@@ -51,7 +51,7 @@ function ToneKnob({ label, value, onChange }: ToneKnobProps) {
 
   return (
     <div className="flex flex-col items-center gap-1 select-none">
-      <div className="relative" style={{ width: 92, height: 92 }}>
+      <div className="relative" style={{ width: 92, height: 80 }}>
         {/* tick dots: 5 marks across the arc, with a brighter "0" at top */}
         {Array.from({ length: 5 }).map((_, i) => {
           const a = -135 + i * 67.5;

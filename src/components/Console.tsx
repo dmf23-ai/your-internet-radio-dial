@@ -184,7 +184,7 @@ export default function Console() {
 
         {/* Maker's plate — pushed down so it clears the top row of cabinet
             controls (POWER · SUGGESTION BOX · ?). */}
-        <div className="flex justify-center mt-12 sm:mt-14 mb-3 sm:mb-5">
+        <div className="flex justify-center mt-10 sm:mt-11 mb-2 sm:mb-3">
           <div className="px-4 py-1 rounded-full surface-brass text-walnut-900 font-display text-sm sm:text-base tracking-[0.25em] uppercase">
             Your Internet Radio Dial
           </div>
@@ -193,7 +193,7 @@ export default function Console() {
         {/* Main console layout */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5 md:gap-7">
           {/* Left column: volume + VU on mobile goes top */}
-          <div className="md:col-span-3 flex md:flex-col items-center justify-around gap-5 order-2 md:order-1">
+          <div className="md:col-span-3 flex md:flex-col items-center justify-around gap-3 order-2 md:order-1">
             <VUMeter />
             <VolumeKnob />
           </div>
@@ -217,7 +217,7 @@ export default function Console() {
         </div>
 
         {/* Preset / group bar + search + menu */}
-        <div className="mt-5 sm:mt-6">
+        <div className="mt-3 sm:mt-4">
           <PresetBar />
         </div>
 
@@ -230,7 +230,7 @@ export default function Console() {
             (Bass/Treble) in the middle, Drift/Scan on the right. Sits as a
             unified band of brass-on-walnut auxiliary controls below the
             speaker grille and above the maker-plate footer. */}
-        <div className="mt-5 sm:mt-6 flex flex-wrap items-center justify-between gap-3 sm:gap-5">
+        <div className="mt-5 sm:mt-6 flex flex-wrap items-start justify-between gap-3 sm:gap-5">
           <DozePlaque />
           <TonePanel />
           <ScanButton />
