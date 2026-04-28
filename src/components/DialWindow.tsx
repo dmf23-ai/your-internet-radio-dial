@@ -78,8 +78,17 @@ function ScrollingCaption({
       if (needs) setDuration(Math.max(12, w / 50));
     };
     check();
+    // Web fonts may still be loading on first paint; their swap changes the
+    // measurer's intrinsic width without changing the pill's clientWidth,
+    // so the ResizeObserver below wouldn't catch it. Re-measure once fonts
+    // settle. (Manifests on machines where a corporate VPN delays the WOFF2
+    // fetch enough that initial measurement happens against a fallback font
+    // — Times-on-Windows is much narrower than Cormorant Garamond, so the
+    // cached duration ends up wildly short once the real font swaps in.)
+    document.fonts?.ready?.then(check);
     const ro = new ResizeObserver(check);
     ro.observe(outer);
+    ro.observe(m); // catch any inner-width changes (font swap, zoom, reflow)
     return () => ro.disconnect();
   }, [text]);
 
