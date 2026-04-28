@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRadioStore } from "@/lib/store";
 import { getSupabase } from "@/lib/supabase/client";
@@ -10,7 +10,10 @@ import { getSupabase } from "@/lib/supabase/client";
  *
  * Two tabs:
  *   - "Suggest a Station" → submit a station for inclusion in the default
- *     library (name, stream URL, optional notes).
+ *     library (name, stream URL, optional notes). The brass magnifying-glass
+ *     button beside the name field opens an inline directory search (same
+ *     /api/stations endpoint as Add-a-Station); selecting a result
+ *     auto-populates name, URL, and a metadata blurb in the notes field.
  *   - "Other" → free-text suggestion / bug report / love letter / etc.
  *
  * In both modes the user may optionally provide a contact email for
@@ -30,6 +33,27 @@ type SubmitStatus =
   | { kind: "sent" }
   | { kind: "error"; message: string };
 
+// Shape of a row from /api/stations (radio-browser.info proxy). Duplicated
+// from SearchOverlay rather than imported so the two overlays stay
+// self-contained.
+type ApiStation = {
+  stationuuid: string;
+  name: string;
+  url_resolved: string;
+  codec: string;
+  bitrate: number;
+  hls: 0 | 1;
+  lastcheckok: 0 | 1;
+  favicon: string;
+  homepage: string;
+  country: string;
+  countrycode: string;
+  tags: string;
+};
+
+const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_MIN_QUERY = 2;
+
 export default function SuggestionBoxOverlay() {
   const open = useRadioStore((s) => s.ui.suggestionBoxOpen);
   const setOpen = useRadioStore((s) => s.setSuggestionBoxOpen);
@@ -47,6 +71,15 @@ export default function SuggestionBoxOverlay() {
 
   const [status, setStatus] = useState<SubmitStatus>({ kind: "idle" });
 
+  // --- station-search subview state ---
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<ApiStation[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
   // Reset everything when the overlay closes so reopening is fresh.
   useEffect(() => {
     if (!open) {
@@ -57,21 +90,119 @@ export default function SuggestionBoxOverlay() {
       setStationNotes("");
       setMessage("");
       setStatus({ kind: "idle" });
+      setSearchOpen(false);
+      setSearchQuery("");
+      setSearchResults([]);
+      setSearchError(null);
+      setSearchLoading(false);
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
     }
   }, [open]);
 
-  // ESC closes.
+  // Focus the search input when the search subview opens.
+  useEffect(() => {
+    if (!searchOpen) return;
+    const id = requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [searchOpen]);
+
+  // ESC closes — but if the search subview is open, ESC backs out of it
+  // first instead of closing the whole overlay.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      if (searchOpen) {
+        setSearchOpen(false);
+      } else {
+        setOpen(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, setOpen]);
+  }, [open, searchOpen, setOpen]);
+
+  // Debounced directory search (only active when the search subview is open).
+  useEffect(() => {
+    if (!searchOpen) return;
+    const q = searchQuery.trim();
+    if (q.length < SEARCH_MIN_QUERY) {
+      setSearchResults([]);
+      setSearchError(null);
+      setSearchLoading(false);
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      void runDirectorySearch(q);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, searchOpen]);
+
+  async function runDirectorySearch(q: string) {
+    searchAbortRef.current?.abort();
+    const ac = new AbortController();
+    searchAbortRef.current = ac;
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const res = await fetch(
+        `/api/stations?name=${encodeURIComponent(q)}&limit=25`,
+        { signal: ac.signal },
+      );
+      if (!res.ok) {
+        setSearchError(`Search failed (${res.status})`);
+        setSearchResults([]);
+        return;
+      }
+      const body = (await res.json()) as { results: ApiStation[] };
+      setSearchResults(body.results ?? []);
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string };
+      if (err?.name === "AbortError") return;
+      setSearchError(err?.message ?? "Search failed");
+      setSearchResults([]);
+    } finally {
+      if (searchAbortRef.current === ac) {
+        setSearchLoading(false);
+        searchAbortRef.current = null;
+      }
+    }
+  }
+
+  // Result selected from the directory: spray its metadata into the form
+  // fields and return to the form view. The notes field gets a "country ·
+  // codec · bitrate · tags · homepage" blurb the user can edit further.
+  function handleSelectFromDirectory(s: ApiStation) {
+    setStationName(s.name || "");
+    setStationUrl(s.url_resolved || "");
+    const noteParts: string[] = [];
+    if (s.country) noteParts.push(s.country);
+    if (s.bitrate) noteParts.push(`${s.bitrate} kbps`);
+    if (s.codec) noteParts.push(s.codec);
+    if (s.hls) noteParts.push("HLS");
+    if (s.tags) {
+      const tagsTrim = s.tags
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 5)
+        .join(", ");
+      if (tagsTrim) noteParts.push(`Tags: ${tagsTrim}`);
+    }
+    if (s.homepage) noteParts.push(s.homepage);
+    setStationNotes(noteParts.join(" · "));
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchResults([]);
+  }
 
   const canSubmit =
     status.kind !== "sending" &&
+    !searchOpen &&
     (tab === "station"
       ? stationName.trim().length > 0 && stationUrl.trim().length > 0
       : message.trim().length > 0);
@@ -132,6 +263,16 @@ export default function SuggestionBoxOverlay() {
     }
     setStatus({ kind: "sent" });
   }
+
+  const searchStatusLine = (() => {
+    const q = searchQuery.trim();
+    if (q.length === 0) return "Type a station name to search the directory";
+    if (q.length < SEARCH_MIN_QUERY) return "Keep typing…";
+    if (searchLoading) return "Searching…";
+    if (searchError) return searchError;
+    if (searchResults.length === 0) return "No matches";
+    return `${searchResults.length} station${searchResults.length === 1 ? "" : "s"} found`;
+  })();
 
   return (
     <AnimatePresence>
@@ -221,6 +362,20 @@ export default function SuggestionBoxOverlay() {
             >
               {status.kind === "sent" ? (
                 <SentState onClose={() => setOpen(false)} />
+              ) : searchOpen ? (
+                <StationSearchPanel
+                  inputRef={searchInputRef}
+                  query={searchQuery}
+                  setQuery={setSearchQuery}
+                  results={searchResults}
+                  statusLine={searchStatusLine}
+                  onSelect={handleSelectFromDirectory}
+                  onCancel={() => {
+                    setSearchOpen(false);
+                    setSearchQuery("");
+                    setSearchResults([]);
+                  }}
+                />
               ) : (
                 <>
                   <p className="text-[13px] sm:text-sm leading-relaxed text-ink/90 mb-5">
@@ -252,15 +407,50 @@ export default function SuggestionBoxOverlay() {
                     {tab === "station" ? (
                       <>
                         <Field label="Station Name">
-                          <input
-                            type="text"
-                            required
-                            value={stationName}
-                            onChange={(e) => setStationName(e.target.value)}
-                            placeholder="e.g. WFMT Chicago"
-                            className={inputClass}
-                            style={inputStyle}
-                          />
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              required
+                              value={stationName}
+                              onChange={(e) => setStationName(e.target.value)}
+                              placeholder="e.g. WFMT Chicago"
+                              className={inputClass + " flex-1 min-w-0"}
+                              style={inputStyle}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setSearchOpen(true)}
+                              aria-label="Search the station directory"
+                              title="Search the station directory"
+                              className="shrink-0 w-10 rounded-md flex items-center justify-center transition-transform active:translate-y-[1px]"
+                              style={brassIconStyle}
+                            >
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 14 14"
+                                fill="none"
+                                aria-hidden
+                              >
+                                <circle
+                                  cx="6"
+                                  cy="6"
+                                  r="4"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                />
+                                <line
+                                  x1="9.2"
+                                  y1="9.2"
+                                  x2="12"
+                                  y2="12"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                            </button>
+                          </div>
                         </Field>
 
                         <Field label="Stream URL">
@@ -282,7 +472,7 @@ export default function SuggestionBoxOverlay() {
                             onChange={(e) => setStationNotes(e.target.value)}
                             placeholder="Why this one? Genre, region, anything noteworthy."
                             className={inputClass + " resize-none"}
-                          style={inputStyle}
+                            style={inputStyle}
                           />
                         </Field>
                       </>
@@ -307,6 +497,7 @@ export default function SuggestionBoxOverlay() {
                         onChange={(e) => setContactEmail(e.target.value)}
                         placeholder="In case we'd like to follow up."
                         className={inputClass}
+                        style={inputStyle}
                       />
                     </Field>
 
@@ -404,6 +595,146 @@ function Field({
       </span>
       {children}
     </label>
+  );
+}
+
+// Inline directory-search subview shown when the user clicks the
+// magnifying-glass button next to the Station Name field. Cream/ink palette
+// to match the suggestion box body, and result rows that read on the same
+// background.
+function StationSearchPanel({
+  inputRef,
+  query,
+  setQuery,
+  results,
+  statusLine,
+  onSelect,
+  onCancel,
+}: {
+  inputRef: React.RefObject<HTMLInputElement>;
+  query: string;
+  setQuery: (v: string) => void;
+  results: ApiStation[];
+  statusLine: string;
+  onSelect: (s: ApiStation) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-display uppercase tracking-[0.22em] text-[11px] sm:text-xs text-walnut-700">
+          Search the Directory
+        </h3>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="font-display uppercase tracking-[0.2em] text-[10px] sm:text-[11px] px-2 py-1 rounded-md text-walnut-700 hover:text-walnut-900 transition-colors"
+        >
+          ← Back
+        </button>
+      </div>
+
+      <input
+        ref={inputRef}
+        type="search"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="e.g. KEXP, jazz, Radio Paradise"
+        className={inputClass}
+        style={inputStyle}
+        autoComplete="off"
+        spellCheck={false}
+      />
+
+      <div className="text-[10px] tracking-[0.18em] uppercase text-walnut-700/80">
+        {statusLine}
+      </div>
+
+      <div className="flex flex-col gap-1 max-h-[48vh] overflow-y-auto -mx-1 px-1">
+        {results.map((r) => (
+          <SuggestResultRow
+            key={r.stationuuid}
+            s={r}
+            onSelect={() => onSelect(r)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// One row of search results, styled for the ivory body. Whole row is
+// clickable; "Use" button on the right gives a clear affordance.
+function SuggestResultRow({
+  s,
+  onSelect,
+}: {
+  s: ApiStation;
+  onSelect: () => void;
+}) {
+  const [iconOk, setIconOk] = useState(!!s.favicon);
+  const subtitle = [
+    s.country,
+    s.bitrate ? `${s.bitrate} kbps` : null,
+    s.codec ? s.codec : null,
+    s.hls ? "HLS" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="w-full flex items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-walnut-700/10 active:bg-walnut-700/15"
+    >
+      <div
+        className="shrink-0 w-9 h-9 rounded-md overflow-hidden flex items-center justify-center"
+        aria-hidden
+        style={{
+          background: "rgba(90,63,26,0.12)",
+          border: "1px solid rgba(90,63,26,0.25)",
+        }}
+      >
+        {iconOk && s.favicon ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={s.favicon}
+            alt=""
+            width={36}
+            height={36}
+            className="w-full h-full object-cover"
+            onError={() => setIconOk(false)}
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <span className="font-display text-walnut-700/70 text-xs">
+            {(s.name || "?").slice(0, 1).toUpperCase()}
+          </span>
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-ink truncate">{s.name}</div>
+        <div className="text-[11px] text-walnut-700/70 truncate">
+          {subtitle || "—"}
+        </div>
+      </div>
+
+      <span
+        className="shrink-0 font-display uppercase tracking-[0.18em] text-[10px] sm:text-[11px] rounded-md px-3 py-1.5"
+        style={{
+          color: "#1a120a",
+          background:
+            "radial-gradient(circle at 30% 20%, #f0d9a8 0%, #b48a49 70%, #8a6a32 100%)",
+          border: "1px solid rgba(0,0,0,0.5)",
+          boxShadow:
+            "inset 0 1px 2px rgba(255,240,200,0.6), 0 1px 2px rgba(0,0,0,0.3)",
+        }}
+      >
+        Use
+      </span>
+    </button>
   );
 }
 
