@@ -217,7 +217,7 @@ export default function Console() {
         </div>
 
         {/* Preset / group bar + search + menu */}
-        <div className="mt-3 sm:mt-4">
+        <div className="mt-6 sm:mt-7">
           <PresetBar />
         </div>
 

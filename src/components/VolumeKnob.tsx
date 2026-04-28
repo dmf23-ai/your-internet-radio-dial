@@ -131,7 +131,7 @@ export default function VolumeKnob() {
           </div>
         </div>
       </div>
-      <span className="font-display tracking-[0.25em] uppercase text-xs text-brass-300">
+      <span className="-mt-3 font-display tracking-[0.25em] uppercase text-xs text-brass-300">
         Volume
       </span>
     </div>
