@@ -38,23 +38,24 @@ export default function Console() {
             "0 30px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,200,140,0.08) inset",
         }}
       >
-        {/* Corner screws */}
-        <div className="brass-screw absolute top-3 left-3" />
-        <div className="brass-screw absolute top-3 right-3" />
+        {/* Corner screws — both upper screws omitted to clear room for the
+            POWER button (upper-left) and "?" button (upper-right) which now
+            sit closer to the cabinet's top edges. */}
         <div className="brass-screw absolute bottom-3 left-3" />
         <div className="brass-screw absolute bottom-3 right-3" />
 
-        {/* Suggestion Box mail-slot — mounted on the cabinet's upper-left
-            corner, paired with the "?" on the upper-right. Brass face plate
-            with four corner screws, a textured recessed slot suggesting an
-            inner brass lip and a glimpse of the flap beyond, and an engraved
-            "Suggestion Box" label beneath. */}
+        {/* Suggestion Box mail-slot — mounted at the top of the cabinet,
+            centered horizontally between the POWER button (upper-left) and
+            the "?" button (upper-right). Brass face plate with four corner
+            screws, a textured recessed slot suggesting an inner brass lip
+            and a glimpse of the flap beyond, and an engraved "Suggestion
+            Box" label beneath. */}
         <button
           type="button"
           onClick={() => setSuggestionBoxOpen(true)}
           aria-label="Suggestion Box"
           title="Drop a suggestion in the slot"
-          className="absolute top-2.5 left-14 sm:top-3.5 sm:left-16 z-10 transition-transform active:translate-y-[1px]"
+          className="absolute top-2.5 sm:top-3.5 left-1/2 -translate-x-1/2 z-10 transition-transform active:translate-y-[1px]"
           style={{
             width: 144,
             padding: "7px 12px 5px",
@@ -142,6 +143,13 @@ export default function Console() {
           </div>
         </button>
 
+        {/* POWER — mounted on the cabinet's upper-left corner, mirroring
+            the "?" button on the upper-right. The brass-rimmed lamp sits
+            in the corner; the "POWER" wordmark extends inward. */}
+        <div className="absolute top-2.5 left-3 sm:top-3.5 sm:left-4 z-10">
+          <PowerButton />
+        </div>
+
         {/* Brass "?" — About / How to Use. Sized to match the preset-bar
             brass icon family (40px) so it reads as a peer control rather than
             a tucked-away accent. The inner brass ring around the glyph
@@ -151,7 +159,7 @@ export default function Console() {
           onClick={() => setAboutOpen(true)}
           aria-label="About &amp; how to use"
           title="About &amp; how to use"
-          className="absolute top-2.5 right-7 sm:top-3.5 sm:right-9 w-10 h-10 rounded-full flex items-center justify-center transition-transform active:translate-y-[1px] z-10"
+          className="absolute top-2.5 right-3 sm:top-3.5 sm:right-4 w-10 h-10 rounded-full flex items-center justify-center transition-transform active:translate-y-[1px] z-10"
           style={{
             background:
               "radial-gradient(circle at 30% 25%, #f0d9a8 0%, #b48a49 55%, #5a3f1a 100%)",
@@ -174,8 +182,9 @@ export default function Console() {
           </span>
         </button>
 
-        {/* Maker's plate */}
-        <div className="flex justify-center mb-3 sm:mb-5">
+        {/* Maker's plate — pushed down so it clears the top row of cabinet
+            controls (POWER · SUGGESTION BOX · ?). */}
+        <div className="flex justify-center mt-12 sm:mt-14 mb-3 sm:mb-5">
           <div className="px-4 py-1 rounded-full surface-brass text-walnut-900 font-display text-sm sm:text-base tracking-[0.25em] uppercase">
             Your Internet Radio Dial
           </div>
@@ -189,9 +198,16 @@ export default function Console() {
             <VolumeKnob />
           </div>
 
-          {/* Center: dial window */}
-          <div className="md:col-span-6 order-1 md:order-2">
+          {/* Center: dial window + ON AIR lamp. The lamp sits in a flex-1
+              spacer below the dial; in the desktop layout the row stretches
+              to match the taller volume column on the left, so the lamp
+              vertically centers in the empty space between the dial face
+              and the band ribbon below. */}
+          <div className="md:col-span-6 order-1 md:order-2 flex flex-col">
             <DialWindow />
+            <div className="flex-1 flex items-center justify-center mt-3">
+              <OnAirLamp />
+            </div>
           </div>
 
           {/* Right column: tuning knob */}
@@ -220,14 +236,6 @@ export default function Console() {
           <ScanButton />
         </div>
 
-        {/* Footer: Power button + maker plate + On Air lamp */}
-        <div className="mt-5 flex items-center justify-between">
-          <PowerButton />
-          <div className="font-display italic text-brass-300 text-sm sm:text-base tracking-wide">
-            Model No. 1 · Est. 2026
-          </div>
-          <OnAirLamp />
-        </div>
       </div>
 
       {/* Overlays — rendered at cabinet root so they float above everything */}

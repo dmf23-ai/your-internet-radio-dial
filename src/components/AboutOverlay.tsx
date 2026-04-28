@@ -120,7 +120,7 @@ export default function AboutOverlay() {
               </Section>
 
               <Section title="The Power Switch">
-                The brass-rimmed lamp at the lower-left switches the set on
+                The brass-rimmed lamp at the upper-left switches the set on
                 and off. Press it once to begin; press it again to silence
                 the room. The lamp burns amber while a station plays.
               </Section>
@@ -147,6 +147,14 @@ export default function AboutOverlay() {
                 volume. Turn it clockwise to raise the sound; counter-
                 clockwise to lower it. The needle on the meter beside it
                 rises and falls with the music itself.
+              </Section>
+
+              <Section title="The On-Air Lamp">
+                Between the dial face above and the band ribbon below, a
+                small lamp keeps faithful watch. It burns steady amber
+                while a station is on air, pulses softly while the signal
+                is being tuned, and falls dark when the set is silent.
+                Should the signal ever be lost, it turns a quiet red.
               </Section>
 
               <Section title="Bands, Your Preset Buttons">
@@ -233,12 +241,14 @@ export default function AboutOverlay() {
               </Section>
 
               <Section title="The Suggestion Box">
-                In the upper-left corner of the room, mounted on the wall
-                like the post-box of old, you will find a small brass{" "}
-                <strong className="font-semibold">Suggestion Box</strong>.
-                Drop your thoughts through the slot — propose a station for
-                the default library, or share any other notion with the
-                workshop. We read every one.
+                Centered at the top of the cabinet — between the power
+                switch on the left and the question mark on the right —
+                you will find a small brass{" "}
+                <strong className="font-semibold">Suggestion Box</strong>,
+                mounted like the post-box of old. Drop your thoughts
+                through the slot — propose a station for the default
+                library, or share any other notion with the workshop. We
+                read every one.
               </Section>
 
               <Section title="And That's the Whole of It">

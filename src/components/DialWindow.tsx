@@ -274,6 +274,13 @@ export default function DialWindow() {
             <span className="opacity-75">A Fruchtomania Production</span>
           </div>
 
+          {/* Maker's mark — sits under the production credit, etched in
+              walnut ink on the cream dial face. Italic for the period
+              feel; size matches the credit above. */}
+          <div className="flex justify-center px-6 pt-0.5 text-ink/80 font-display italic tracking-wide text-[10px] sm:text-xs">
+            <span>Model No. 1 · Est. 2026</span>
+          </div>
+
           {/* Frequency-style tick marks + station ticks.
               The 41 background hashes are a static "frequency ruler"
               (decorative). The brass station markers ride a sliding
