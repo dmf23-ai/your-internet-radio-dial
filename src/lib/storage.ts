@@ -11,6 +11,10 @@ export interface UserData {
   activeGroupId: string | null;
   currentStationId: string | null;
   volume: number; // 0..1
+  // Tone (M13). Optional — older saves predate these fields; default to 0
+  // (transparent EQ). Only persisted to IndexedDB; not mirrored to cloud yet.
+  bass?: number; // dB, ±12
+  treble?: number; // dB, ±12
   version: number;
 }
 

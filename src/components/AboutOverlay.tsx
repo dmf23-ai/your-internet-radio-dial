@@ -112,60 +112,138 @@ export default function AboutOverlay() {
               }}
             >
               <Section title="A Warm Welcome">
-                Good evening, dear listener.{" "}
+                Dear listeners, so glad you found us.{" "}
                 <em className="italic">Your Internet Radio Dial</em> is a
-                hand-crafted receiver for the broadcasts traveling the
-                world-wide web. Turn the knob and let the amber glow carry
-                you where the signal leads.
+                hand-crafted radio receiver for the internet age, curated
+                yet customizable. Turn the knob and let the amber glow
+                carry you where the signal leads.
+              </Section>
+
+              <Section title="The Power Switch">
+                The brass-rimmed lamp at the lower-left switches the set on
+                and off. Press it once to begin; press it again to silence
+                the room. The lamp burns amber while a station plays.
               </Section>
 
               <Section title="To Tune the Dial">
-                The brass knob on the right glides you from one station to
-                the next. On the cream ticker-tape beneath the needle, drag
-                the names left or right — the needle stays fixed, the
-                stations roll beneath it. Click any visible name to jump
-                straight to it.
+                The larger brass knob on the right glides you from one
+                station to the next. On the cream ticker-tape beneath the
+                needle, you may also drag the station names left or right —
+                the needle stays fixed; the names roll beneath it. Click
+                any visible name to jump straight to it.
+              </Section>
+
+              <Section title="The Station Card">
+                Beneath the dial sits a small grey pill that names the
+                current station and what it is broadcasting. Click it for
+                a fuller picture — the station&apos;s home, its country
+                and language, its bitrate and format, and a copy of its
+                stream address for the technically-minded. Press{" "}
+                <em className="italic">Esc</em> to return to your listening.
+              </Section>
+
+              <Section title="The Volume Knob">
+                On the left of the cabinet, the smaller knob controls the
+                volume. Turn it clockwise to raise the sound; counter-
+                clockwise to lower it. The needle on the meter beside it
+                rises and falls with the music itself.
               </Section>
 
               <Section title="Bands, Your Preset Buttons">
-                Below the dial, your{" "}
-                <em className="italic">bands</em> are collections of stations
-                grouped however suits you. Click one to bring its stations
-                onto the dial. When you have more bands than the bar can
+                The dark bar below the dial holds your{" "}
+                <em className="italic">bands</em> — collections of stations
+                grouped however suits you. Click any band to bring its
+                stations onto the dial. With more bands than the bar can
                 hold, drag the row sideways or tap the brass arrows at
-                either end.
+                either end. The vertical brass labels{" "}
+                <strong className="font-semibold">RADIO</strong> and{" "}
+                <strong className="font-semibold">BANDS</strong> flank the
+                bar to keep your bearings.
               </Section>
 
               <Section title="Finding New Stations">
-                The brass magnifier at the far left of the preset bar opens
-                the Search. Enter a name, a city, a feeling —{" "}
+                The brass magnifier at the left of the band bar opens the
+                Search. The two tabs at the top let you choose your method:
+                <br />
+                <strong className="font-semibold">Search Directory</strong>{" "}
+                — Enter a name, a city, a feeling —{" "}
                 <em className="italic">
                   &ldquo;jazz,&rdquo; &ldquo;Tokyo,&rdquo; &ldquo;BBC&rdquo;
                 </em>{" "}
-                — and pick from the results. Your choice joins the band of
-                your choosing.
+                — and pick from the results.
+                <br />
+                <strong className="font-semibold">By URL</strong> — If you
+                already know a stream&apos;s address, paste it here with a
+                name of your choosing.
+                <br />
+                Either way, choose the band your new station shall join.
               </Section>
 
               <Section title="Curating Your Bands">
-                The <strong className="font-semibold">New Band</strong>{" "}
-                plaque below the preset bar creates a fresh band. Long-press
-                (or right-click) any band button to rename, reorder, or
-                remove it. The brass lines-icon at the far right opens a
-                drawer of every station in the current band — to reorder,
-                remove, or jump to one.
+                To rename, reorder, or remove an existing band,{" "}
+                <em className="italic">long-press</em> (hold the button for
+                half a second) — or, on a desktop, right-click. A small
+                editor appears with all the controls you need. Below the
+                band bar, the{" "}
+                <strong className="font-semibold">+ New Band</strong> plaque
+                creates a fresh, empty band.
               </Section>
 
-              <Section title="Your Identity on the Air">
-                The brass person-icon opens your Account. As a guest, your
-                library is kept on this device alone. Add your email address
-                and your stations will travel with you from device to
-                device. The small red dot is a gentle reminder that you are
-                yet a guest.
+              <Section title="The Station Drawer">
+                The brass three-line button at the right of the band bar
+                opens a drawer of every station in the current band. From
+                there you may jump straight to a station, change its
+                position in the band, or remove it from the band entirely.
+              </Section>
+
+              <Section title="A Portable Library">
+                The brass person-icon at the left of the band bar opens
+                your Account. As a guest, your library is kept on this
+                device alone — close the browser and it remains; open it
+                elsewhere and it does not follow.
+                <br />
+                Provide your email address and we will send a confirmation
+                link. Click it, and your library will travel with you to
+                every device you sign in from. Already signed up on another
+                device? Use the{" "}
+                <em className="italic">&ldquo;sign in instead&rdquo;</em>{" "}
+                link to load your synced library here. The small red dot
+                on the person-icon is a gentle reminder that you are yet a
+                guest.
+              </Section>
+
+              <Section title="Drift / Scan">
+                On the right of the speaker grille, the brass{" "}
+                <strong className="font-semibold">SCAN</strong> button
+                wanders the airwaves on your behalf — every twelve seconds
+                it tunes to a fresh station drawn from any of your bands.
+                The lamp beside it pulses while a drift is in progress.
+                Tune the dial yourself, or press the button again, to bring
+                the wandering to a halt.
+              </Section>
+
+              <Section title="The Doze Plaque">
+                On the left of the speaker grille, the small{" "}
+                <strong className="font-semibold">DOZE</strong> plaque is a
+                sleep timer for the late hour. Select a fifteen, thirty,
+                sixty, or ninety minute countdown. While running, the
+                plaque shows the time remaining; in the final thirty
+                seconds the volume slowly falls to a hush before the set
+                switches itself off. Double-click to cancel at any moment.
+              </Section>
+
+              <Section title="The Suggestion Box">
+                In the upper-left corner of the room, mounted on the wall
+                like the post-box of old, you will find a small brass{" "}
+                <strong className="font-semibold">Suggestion Box</strong>.
+                Drop your thoughts through the slot — propose a station for
+                the default library, or share any other notion with the
+                workshop. We read every one.
               </Section>
 
               <Section title="And That's the Whole of It">
-                Turn the knob, settle into your favorite chair, and let the
-                airwaves do the rest. Happy listening.
+                Turn the knob, settle into your favorite chair, and travel
+                on waves of sound across the great Web. Bon voyage!
               </Section>
             </div>
           </motion.div>

@@ -17,6 +17,7 @@ export default function StoreHydrator({
   const hydrate = useRadioStore((s) => s.hydrate);
   const setUser = useRadioStore((s) => s.setUser);
   const applyCloudSnapshot = useRadioStore((s) => s.applyCloudSnapshot);
+  const restoreEmptySeedBands = useRadioStore((s) => s.restoreEmptySeedBands);
 
   // Tracks the uid we currently believe we're acting as. Used by the
   // auth-change subscriber to detect a true cross-device sign-in (uid
@@ -73,12 +74,20 @@ export default function StoreHydrator({
         // eslint-disable-next-line no-console
         console.log("[sync] initial cloud seed complete");
       }
+
+      // 4. Idempotent data repair: any seed-default band that exists in the
+      //    user's library but has zero memberships gets its seed memberships
+      //    restored. Runs after step 3 so it sees the truly active state
+      //    (cloud snapshot applied, or local seed pushed up). No-op when
+      //    every default band still has at least one station.
+      if (cancelled) return;
+      await restoreEmptySeedBands();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [hydrate, setUser, applyCloudSnapshot]);
+  }, [hydrate, setUser, applyCloudSnapshot, restoreEmptySeedBands]);
 
   // Subscribe to Supabase auth changes so the store stays in sync with the
   // live session. Fires on:
@@ -127,6 +136,9 @@ export default function StoreHydrator({
               cloud.groups.length,
               "groups",
             );
+            // Re-run the empty-seed-band repair against the freshly pulled
+            // library — same rationale as on initial bootstrap.
+            await restoreEmptySeedBands();
           }
         }
         return;
@@ -143,7 +155,7 @@ export default function StoreHydrator({
       }
     });
     return unsubscribe;
-  }, [setUser, applyCloudSnapshot]);
+  }, [setUser, applyCloudSnapshot, restoreEmptySeedBands]);
 
   return <>{children}</>;
 }

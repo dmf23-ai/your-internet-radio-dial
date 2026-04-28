@@ -14,11 +14,16 @@
 > 10. `.auto-memory/project_m8_url_add_milestone.md` — M8 add-station-by-URL
 > 11. `.auto-memory/project_m9_curated_seed_milestone.md` — M9 curated default library
 > 12. `.auto-memory/project_m10_reconnect_milestone.md` — M10 auto-reconnect on stream drops
-> 13. `.auto-memory/project_deploy_checklist.md` — deploy punch list if that's where we are
+> 13. `.auto-memory/project_m11_prewarm_milestone.md` — M11 dual-slot pre-warm + instant swap (eliminates the reconnect blip)
+> 14. `.auto-memory/project_m12_polish_milestone.md` — M12 affordance polish + Suggestion Box
+> 15. `.auto-memory/project_m13_features_milestone.md` — M13 Doze, Tone (Bass/Treble), Scan, Station Detail Card
+> 16. `.auto-memory/project_deploy_checklist.md` — deploy punch list if that's where we are
 >
 > Then the rest of this doc. These memory files live at `<workspace>/.auto-memory/` (or at the user's global memory directory if the workspace copy isn't present — `MEMORY.md` lists them).
 
-**Status (2026-04-26):** M1 → M10 shipped. Live at https://yourinternetradiodial.net. Full library management — search radio-browser, add stations by URL, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data, magic-link sign-in for cross-device library load). M5 cleared the pre-deploy UX backlog. M6 added cross-device sign-in (overwrite, not merge). M7 added a rotate-to-landscape nudge for phones in portrait. M8 added "Add by URL" path inside the search overlay. M9 replaced the seed with David's curated library (7 bands, 49 stations). M10 added transparent auto-reconnect when Vercel times out the proxy stream — retries 3x with backoff before showing SIGNAL LOST.
+**Status (2026-04-27):** M1 → M13 shipped. Live at https://yourinternetradiodial.net. Full library management — search radio-browser, add stations by URL, rename/reorder/delete bands, reorder/remove stations. Supabase auth + cloud sync complete (anon-by-default, email upgrade preserves uid + data, magic-link sign-in for cross-device library load). M5 cleared the pre-deploy UX backlog. M6 added cross-device sign-in (overwrite, not merge). M7 added a rotate-to-landscape nudge for phones in portrait. M8 added "Add by URL" path inside the search overlay. M9 replaced the seed with David's curated library (7 bands, 49 stations). M10 added transparent auto-reconnect when Vercel times out the proxy stream — retries 3x with backoff before showing SIGNAL LOST. M11 went one further: dual-slot pre-warm 30s before the expected cut, instant swap with no audible blip. M12 polished cabinet affordances (power button bezel, NEW BAND plaque, bigger "?" button, expanded About copy) and added a Supabase-backed Suggestion Box. M13 shipped four user-facing features in one pass: Doze (sleep timer with last-30s fade), Tone (Bass/Treble knobs), Scan (random drift across bands), and a Station Detail Card opened by clicking the dial caption. The Suggestion Box was later redesigned as an old-fashioned brass mail slot mounted in the cabinet's upper-left corner.
+
+**Pending git state:** M12 + M13 work is uncommitted on `main`. 12 modified files + 5 new components (`DozePlaque.tsx`, `ScanButton.tsx`, `StationDetailCard.tsx`, `SuggestionBoxOverlay.tsx`, `TonePanel.tsx`). Last commit on the branch is `fad2b59 M11`.
 
 ---
 
@@ -38,16 +43,46 @@
 | M8 | Add-station-by-URL. SearchOverlay grew a brass segmented "Search Directory / By URL" tab switcher. URL form: stream URL + station name, validates URL parses with http(s) protocol, infers `streamType` from path extension (.m3u8 → hls, .mp3, .aac, .ogg, else "unknown"), defaults `corsOk:false` so the proxy path is used. Reuses existing URL-based dedup in `addStationToGroup` | `src/components/SearchOverlay.tsx` |
 | M9 | Curated default library. Replaced the bundled 4-band/22-station starter seed with David's personal export (7 bands, 49 stations: Favorites, Austin, Jazz, News/Talk, Ambient/Electronic, Around the World, Exploratorium). New users land on Favorites with WEFUNK preselected. Bumped `CURRENT_VERSION` 9→10 so existing devices invalidate their IndexedDB and re-seed on next load (signed-in users immediately re-pull from cloud) | `src/data/seed.ts`, `src/lib/storage.ts` |
 | M10 | Auto-reconnect on stream drop. When Vercel terminates the `/api/stream` or `/api/hls` function mid-playback (or any other transient drop), the engine now retries up to 3x with [500ms, 1500ms, 4000ms] backoff. Lamp shows "Tuning…" during retries; SIGNAL LOST appears only after exhausting retries. New engine state: `intentPlaying`, `currentType`+`currentCorsOk`, `reconnectAttempts`, `reconnectTimer`, `inTransition` (suppresses cleanup-pause race). Also set `export const maxDuration = 300` on both proxy routes to extend Vercel function lifetime where plan permits | `src/lib/audio.ts`, `src/app/api/stream/route.ts`, `src/app/api/hls/route.ts` |
+| M11 | Dual-slot pre-warm + instant swap. Audio engine now keeps two CORS-clean `<audio>` elements wired in parallel through the AudioContext graph (each with its own `MediaElementAudioSourceNode` + per-slot `GainNode`). 270s after the active slot's `playing` event, the inactive slot silently buffers the same proxy URL. On `ended`/`pause`/`error` the engine 50ms-crossfades between slot mixes — no audible gap. Falls back to M10 reconnect when pre-warm isn't ready (HLS streams, transient pre-warm failures). Removed the dead `nocorsEl` path; `getRms()` no longer special-cases active path | `src/lib/audio.ts` |
+| M12 | Affordance polish + Suggestion Box. Power button rebuilt with brass bezel + IEC ⏻ glyph; "New Band" plaque switched from brass-on-brass to dark walnut + "+" SVG glyph for readability; "?" button bumped 28→40px with etched ring; About overlay sections expanded 7→12 to cover every interaction in old-timey announcer voice. New Suggestion Box overlay (tabbed: "Suggest a Station" / "Other Suggestion") writes to a new Supabase `public.suggestions` table with insert-only RLS — anon key can write but never read. (Later redesigned as a brass mail-slot in the upper-left cabinet corner: face plate + four corner screws + textured recessed slot + engraved "SUGGESTION BOX" label) | `src/components/Lamps.tsx`, `PresetBar.tsx`, `Console.tsx`, `AboutOverlay.tsx`, `SuggestionBoxOverlay.tsx`, `src/lib/store.ts`, `supabase/schema.sql` |
+| M13 | Doze, Tone, Scan, Station Card — four user-facing features in one pass. Audio graph extended: `slot mixes → analyser → bassFilter (lowshelf 200Hz) → trebleFilter (highshelf 4kHz) → masterGain → dozeGain → destination`. Analyser stays *above* EQ so VU shows source signal; dozeGain is its own node *after* masterGain so volume keeps working through a fade. New "service controls" strip below the speaker grille: `[DozePlaque] [TonePanel] [ScanButton]`. Doze cycles OFF→15→30→60→90 min, MM:SS countdown, fades the last 30s. Tone is two compact 92px brass knobs (-12..+12 dB, ±0.75 dB snap-to-zero detent, double-click resets, dB readout). Scan picks a random station from any band every 12s, pulsing lamp; manual tune cancels. Station Detail Card is a modal in the AboutOverlay visual family, opened by clicking the dial caption pill — logo, name, now-playing (re-fetched 30s), country/language/bitrate/format/tags, homepage link, copy-to-clipboard stream URL | `src/lib/audio.ts`, `src/lib/storage.ts`, `src/lib/store.ts`, `src/components/TonePanel.tsx`, `DozePlaque.tsx`, `ScanButton.tsx`, `StationDetailCard.tsx`, `DialWindow.tsx`, `Console.tsx`, `AboutOverlay.tsx` |
 
 ---
 
 ## Architecture notes worth preserving
 
-### Two-element audio engine (`src/lib/audio.ts`)
+### Dual-slot audio engine (`src/lib/audio.ts`) — M11
 
-- `corsEl` — `crossOrigin="anonymous"`; routed through AudioContext graph (source → analyser → gain → destination). VU meter reads `getRms()` from the analyser.
-- `nocorsEl` — no `crossOrigin`; plain element playback. Kept as a safety fallback but currently unused since every non-CORS stream now routes through `/api/stream` or `/api/hls` (both same-origin, so the graph stays untainted).
-- `active: "cors" | "nocors"` tracks which element owns global status so idle-element events don't flip state.
+- Two CORS-clean `<audio>` elements (`slots[0].el`, `slots[1].el`), both `crossOrigin="anonymous"`. Each is permanently wired through its own `MediaElementAudioSourceNode → GainNode (mix)` at context init — `createMediaElementSource` can only be called once per element, so lazy wiring would lock us out.
+- Audio graph: `slot.el → mes → mix → analyser → masterGain → destination`. Both slot mixes feed the same shared analyser/master chain. Per-slot mix gain is `1` for the active slot and `0` for the other. masterGain holds the user's volume independently, so the VU meter and volume control are unaffected by swaps.
+- `activeIdx: 0 | 1` tracks which slot is audible. Status updates and pre-warm scheduling key off this — events from the inactive slot are filtered out (except `playing`, which records `slot.startedAt`).
+- **Pre-warm:** 270s after the active slot's `playing` event (Vercel cap is 300s; 30s safety margin), the inactive slot is pointed at the same proxy URL with mix gain `0` and `.play()` is called. Silently buffers ahead of the cut.
+- **Swap:** when active fires `ended`/`pause`/`error`, `tryFailoverOrReconnect` checks `canSwap()` (pre-warm active, `readyState ≥ 2`, not paused, not HLS). If yes: 50ms `linearRampToValueAtTime` crossfade between mix gains, flip `activeIdx`, tear down old slot, reschedule pre-warm based on the new active's `startedAt`. If no: fall back to M10 `scheduleReconnect`.
+- **HLS exclusion:** `currentIsHls` skips `schedulePrewarm`. HLS streams use M10 reconnect on drop. Pre-warming a parallel `hls.js` instance pointed at the same manifest is more invasive than this milestone wanted to land.
+- **Three guards interact subtly** — `intentPlaying`, `inTransition`, and `prewarmActive`. Any path that synchronously calls `el.pause()` or `el.removeAttribute("src"); el.load()` needs the `inTransition` flag set, or the resulting pause/emptied event will be misread as an unexpected drop and trigger a spurious reconnect/swap. See comments in `audio.ts` lines 70–95.
+
+### Audio extensions (`src/lib/audio.ts`) — M13
+
+The graph grew two `BiquadFilterNode`s and a per-output `dozeGain`:
+
+```
+slot.el → mes → mix ─┐
+                     ├→ analyser → bassFilter (lowshelf 200Hz) → trebleFilter (highshelf 4kHz) → masterGain → dozeGain → destination
+slot.el → mes → mix ─┘
+```
+
+- **Analyser placement** — kept *above* the EQ filters on purpose. The VU meter reflects the source signal, not what the user's EQ is doing. If you move it post-EQ, cranking treble visually pegs the meter without the music actually getting louder.
+- **dozeGain after masterGain** — a separate output-stage gain so a Doze fade-out (`linearRampToValueAtTime` over the final 30s) doesn't fight the user's volume knob. They can still ride volume during the fade without breaking the envelope.
+- **Public API:** `setBass(db)` / `setTreble(db)` / `getBass()` / `getTreble()` for tone; `startDoze(totalSeconds)` / `cancelDoze()` / `getDozeRemainingMs()` for the sleep timer. The tone setters update the BiquadFilterNode `.gain.value` directly. `startDoze` sets up a `setTimeout` that fires the fade ramp 30s before the end and a second `setTimeout` that calls `stop()` at the end.
+- **Persistence quirk** — bass/treble write to IndexedDB only (the existing UserData blob gained two optional fields without a version bump; missing values default to 0). They do *not* sync to Supabase yet — schema would need new columns. Acceptable because EQ is a per-device, per-room preference anyway.
+
+### Scan loop (`src/lib/store.ts`) — M13
+
+- Module-level `scanTimer: ReturnType<typeof setInterval> | null`, with `startScanInterval()` / `stopScanInterval()` helpers — a singleton at module scope so React renders can't multiply the timer.
+- `pickRandomStation` filters to stations that are members of *some* group (skips orphaned imports) and picks across all bands, not just the active one — the whole point is serendipity.
+- Period: 12s.
+- The drift uses `useRadioStore.setState` directly + `engine.play()` to bypass `setCurrentStation`'s "manual tune cancels scan" safeguard — without that, the first auto-drift would cancel itself.
+- Manual tune (any call to `setCurrentStation`) cancels scan. `pause()` cancels both scan and Doze.
 
 ### `corsOk` flag on `Station` (`src/data/seed.ts`)
 

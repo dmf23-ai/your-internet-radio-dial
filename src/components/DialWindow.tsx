@@ -46,8 +46,18 @@ function useNowPlaying(streamUrl: string | undefined): string | null {
  * ScrollingCaption — displays text; if it overflows the container, it scrolls
  * as a seamless marquee (two copies + CSS keyframe translating -50%).
  * Falls back to truncate when the text fits.
+ *
+ * The whole pill is wired as a button when `onClick` is provided — clicking
+ * it opens the Station Detail card (M13). When there's no station tuned
+ * yet, the prop is omitted and the pill renders as a plain div.
  */
-function ScrollingCaption({ text }: { text: string }) {
+function ScrollingCaption({
+  text,
+  onClick,
+}: {
+  text: string;
+  onClick?: () => void;
+}) {
   const outerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const [overflow, setOverflow] = useState(false);
@@ -75,10 +85,15 @@ function ScrollingCaption({ text }: { text: string }) {
 
   const sep = "\u00a0\u00a0•\u00a0\u00a0";
 
+  // The pill itself stays a div for clean ref typing; we layer an absolutely
+  // positioned button over it when interactive, so the click target is the
+  // whole pill but the ref/layout machinery is unaffected.
   return (
     <div
       ref={outerRef}
-      className="relative max-w-full overflow-hidden px-4 py-1 rounded-full bg-walnut-900/40 text-ink font-display italic text-xs sm:text-sm tracking-wide"
+      className={`relative max-w-full overflow-hidden px-4 py-1 rounded-full bg-walnut-900/40 text-ink font-display italic text-xs sm:text-sm tracking-wide ${
+        onClick ? "hover:bg-walnut-900/55 transition-colors" : ""
+      }`}
     >
       {overflow ? (
         <div
@@ -106,6 +121,16 @@ function ScrollingCaption({ text }: { text: string }) {
       >
         {text}
       </span>
+      {onClick && (
+        <button
+          type="button"
+          onClick={onClick}
+          aria-label="Show station details"
+          title="Show station details"
+          className="absolute inset-0 cursor-pointer"
+          style={{ background: "transparent" }}
+        />
+      )}
     </div>
   );
 }
@@ -120,6 +145,7 @@ export default function DialWindow() {
   const current = useRadioStore((s) => s.currentStation());
   const currentStationId = useRadioStore((s) => s.currentStationId);
   const setCurrentStation = useRadioStore((s) => s.setCurrentStation);
+  const setDetailOpen = useRadioStore((s) => s.setDetailOpen);
   const nowPlaying = useNowPlaying(current?.streamUrl);
 
   const count = list.length;
@@ -405,7 +431,10 @@ export default function DialWindow() {
 
           {/* Caption */}
           <div className="absolute left-0 right-0 bottom-2 flex justify-center px-4">
-            <ScrollingCaption text={caption} />
+            <ScrollingCaption
+              text={caption}
+              onClick={current ? () => setDetailOpen(true) : undefined}
+            />
           </div>
         </div>
       </div>

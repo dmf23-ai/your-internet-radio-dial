@@ -10,6 +10,11 @@ import SearchOverlay from "./SearchOverlay";
 import StationListDrawer from "./StationListDrawer";
 import AccountDrawer from "./AccountDrawer";
 import AboutOverlay from "./AboutOverlay";
+import SuggestionBoxOverlay from "./SuggestionBoxOverlay";
+import StationDetailCard from "./StationDetailCard";
+import TonePanel from "./TonePanel";
+import DozePlaque from "./DozePlaque";
+import ScanButton from "./ScanButton";
 import { PowerButton, OnAirLamp } from "./Lamps";
 import { useRadioStore } from "@/lib/store";
 
@@ -20,6 +25,7 @@ import { useRadioStore } from "@/lib/store";
  */
 export default function Console() {
   const setAboutOpen = useRadioStore((s) => s.setAboutOpen);
+  const setSuggestionBoxOpen = useRadioStore((s) => s.setSuggestionBoxOpen);
 
   return (
     <div className="w-full max-w-[1100px]">
@@ -38,23 +44,132 @@ export default function Console() {
         <div className="brass-screw absolute bottom-3 left-3" />
         <div className="brass-screw absolute bottom-3 right-3" />
 
-        {/* Brass "?" — About / How to Use. Tucked into the upper-right of
-            the cabinet beside the corner screw. */}
+        {/* Suggestion Box mail-slot — mounted on the cabinet's upper-left
+            corner, paired with the "?" on the upper-right. Brass face plate
+            with four corner screws, a textured recessed slot suggesting an
+            inner brass lip and a glimpse of the flap beyond, and an engraved
+            "Suggestion Box" label beneath. */}
+        <button
+          type="button"
+          onClick={() => setSuggestionBoxOpen(true)}
+          aria-label="Suggestion Box"
+          title="Drop a suggestion in the slot"
+          className="absolute top-2.5 left-14 sm:top-3.5 sm:left-16 z-10 transition-transform active:translate-y-[1px]"
+          style={{
+            width: 144,
+            padding: "7px 12px 5px",
+            borderRadius: 5,
+            background:
+              "linear-gradient(180deg, #d4a754 0%, #b48a49 45%, #8a6327 100%)",
+            boxShadow:
+              "inset 0 1px 2px rgba(255,240,200,0.7), inset 0 -2px 3px rgba(0,0,0,0.5), 0 4px 8px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.5)",
+          }}
+        >
+          {/* Four corner screws */}
+          {[
+            { top: 3, left: 3 },
+            { top: 3, right: 3 },
+            { bottom: 3, left: 3 },
+            { bottom: 3, right: 3 },
+          ].map((pos, i) => (
+            <span
+              key={i}
+              aria-hidden
+              className="absolute rounded-full"
+              style={{
+                ...pos,
+                width: 5,
+                height: 5,
+                background:
+                  "radial-gradient(circle at 35% 30%, #f0d9a8 0%, #8a6327 70%, #3a280f 100%)",
+                boxShadow:
+                  "inset 0 0 0 0.5px rgba(0,0,0,0.6), 0 1px 1px rgba(0,0,0,0.4)",
+              }}
+            />
+          ))}
+
+          {/* The mail slot — deep dark recess with horizontal grain, a brass
+              lip catching light at the top inner edge, and a faint glimpse of
+              an inner flap beyond. */}
+          <div
+            aria-hidden
+            className="relative mx-auto rounded-[2px] overflow-hidden"
+            style={{
+              width: "82%",
+              height: 11,
+              background:
+                "repeating-linear-gradient(180deg, transparent 0px, transparent 1px, rgba(80,55,30,0.08) 1px, rgba(80,55,30,0.08) 2px), linear-gradient(180deg, #1f140d 0%, #050302 30%, #050302 65%, #14100a 90%, #2a1810 100%)",
+              boxShadow:
+                "inset 0 2px 3px rgba(0,0,0,0.95), inset 0 0 0 1px rgba(120,80,40,0.35), 0 1px 0 rgba(255,240,200,0.45)",
+            }}
+          >
+            {/* Brass lip catching light at the top inner edge */}
+            <div
+              className="absolute inset-x-0 top-0"
+              style={{
+                height: 1,
+                background:
+                  "linear-gradient(90deg, transparent 0%, rgba(220,170,95,0.55) 25%, rgba(245,195,115,0.75) 50%, rgba(220,170,95,0.55) 75%, transparent 100%)",
+              }}
+            />
+            {/* Faint glimpse of an inner flap, set in from the edges */}
+            <div
+              className="absolute"
+              style={{
+                left: "22%",
+                right: "22%",
+                top: "60%",
+                height: 1,
+                background:
+                  "linear-gradient(90deg, transparent 0%, rgba(140,95,45,0.55) 30%, rgba(170,120,60,0.6) 50%, rgba(140,95,45,0.55) 70%, transparent 100%)",
+              }}
+            />
+          </div>
+
+          {/* Engraved label — solid black ink with a softened highlight so
+              the letters read crisp against the brass. */}
+          <div
+            className="font-display tracking-[0.14em] uppercase text-center mt-1.5"
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: "#000",
+              textShadow:
+                "0 1px 0 rgba(255,240,200,0.35), 0 0 0.5px rgba(0,0,0,0.95), 0 0 1.5px rgba(0,0,0,0.55)",
+            }}
+          >
+            Suggestion Box
+          </div>
+        </button>
+
+        {/* Brass "?" — About / How to Use. Sized to match the preset-bar
+            brass icon family (40px) so it reads as a peer control rather than
+            a tucked-away accent. The inner brass ring around the glyph
+            reinforces "circled glyph = information" without adding a label. */}
         <button
           type="button"
           onClick={() => setAboutOpen(true)}
           aria-label="About &amp; how to use"
           title="About &amp; how to use"
-          className="absolute top-2 right-5 sm:top-3 sm:right-6 w-7 h-7 rounded-full flex items-center justify-center transition-transform active:translate-y-[1px] z-10"
+          className="absolute top-2.5 right-7 sm:top-3.5 sm:right-9 w-10 h-10 rounded-full flex items-center justify-center transition-transform active:translate-y-[1px] z-10"
           style={{
             background:
               "radial-gradient(circle at 30% 25%, #f0d9a8 0%, #b48a49 55%, #5a3f1a 100%)",
             boxShadow:
-              "inset 0 1px 1.5px rgba(255,240,200,0.6), inset 0 -1.5px 2px rgba(0,0,0,0.7), 0 1px 2px rgba(0,0,0,0.6)",
+              "inset 0 1px 2px rgba(255,240,200,0.6), inset 0 -2px 3px rgba(0,0,0,0.7), 0 2px 4px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,0,0,0.4)",
             color: "#1a120a",
           }}
         >
-          <span className="font-display text-[14px] leading-none font-bold pb-px">
+          {/* Inner etched ring — "circled glyph" = information cue */}
+          <span
+            aria-hidden
+            className="absolute inset-1.5 rounded-full pointer-events-none"
+            style={{
+              boxShadow:
+                "inset 0 0 0 1px rgba(20,12,6,0.45), inset 0 0 0 2px rgba(255,240,200,0.18)",
+            }}
+          />
+          <span className="relative font-display text-[19px] leading-none font-bold pb-px">
             ?
           </span>
         </button>
@@ -95,6 +210,16 @@ export default function Console() {
           <SpeakerGrille />
         </div>
 
+        {/* Service-controls strip — Doze (sleep timer) on the left, Tone
+            (Bass/Treble) in the middle, Drift/Scan on the right. Sits as a
+            unified band of brass-on-walnut auxiliary controls below the
+            speaker grille and above the maker-plate footer. */}
+        <div className="mt-5 sm:mt-6 flex flex-wrap items-center justify-between gap-3 sm:gap-5">
+          <DozePlaque />
+          <TonePanel />
+          <ScanButton />
+        </div>
+
         {/* Footer: Power button + maker plate + On Air lamp */}
         <div className="mt-5 flex items-center justify-between">
           <PowerButton />
@@ -110,6 +235,8 @@ export default function Console() {
       <StationListDrawer />
       <AccountDrawer />
       <AboutOverlay />
+      <SuggestionBoxOverlay />
+      <StationDetailCard />
     </div>
   );
 }

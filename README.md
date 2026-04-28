@@ -26,11 +26,12 @@ Both are found in your Supabase project's **Settings → API** page. The app wor
 
 ## How it works
 
-- **Audio engine** (`src/lib/audio.ts`) — two HTML5 audio elements: one CORS-enabled and routed through a Web Audio graph (for the VU meter), one fallback. Non-CORS origins route through `/api/stream` or `/api/hls` (same-origin proxies) so the graph stays untainted.
+- **Audio engine** (`src/lib/audio.ts`) — two CORS-clean HTML5 audio elements wired in parallel through a Web Audio graph. The active element drives the VU meter; the inactive one silently pre-buffers ahead of Vercel's 300s function cap and instant-swaps with a 50ms crossfade — no audible blip when the proxy stream times out. Non-CORS origins route through `/api/stream` or `/api/hls` (same-origin proxies). Bass and treble pass through `BiquadFilterNode`s (lowshelf 200Hz / highshelf 4kHz); a separate `dozeGain` after the master volume handles sleep-timer fade-outs.
 - **HLS manifest rewriting** (`src/app/api/hls/route.ts`) — rewrites segment URLs and every `URI="..."` attribute in the manifest so HLS can play from CORS-blocked origins.
 - **Now-playing metadata** (`src/app/api/now-playing/route.ts`) — polls the station's Icecast/Shoutcast metadata and scrolls it across the dial as a marquee.
 - **Station discovery** (`src/app/api/stations/route.ts`) — proxies radio-browser.info so the search overlay can add new stations.
 - **Library sync** (`src/lib/supabase/sync.ts`) — write-through dual-sync: every mutation writes to IndexedDB always, and to Supabase if the user is signed in (anonymous or real). Cloud wins on load.
+- **Suggestion box** — `public.suggestions` table on Supabase with insert-only RLS. The brass mail-slot in the upper-left of the cabinet writes to it; only the service role (Supabase dashboard) can read.
 
 ## Architecture details
 

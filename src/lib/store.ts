@@ -27,6 +27,8 @@ export interface UiState {
   stationListOpen: boolean;
   accountOpen: boolean;
   aboutOpen: boolean;
+  suggestionBoxOpen: boolean;
+  detailOpen: boolean;
 }
 
 export interface PlaybackState {
@@ -54,6 +56,24 @@ export interface RadioState {
   currentStationId: string | null;
   volume: number;
 
+  // Tone (M13). Independently-saved EQ shelves applied by the audio engine.
+  // Range -12..+12 dB; 0 = transparent.
+  bass: number;
+  treble: number;
+
+  // Doze / sleep timer (M13). Both 0 when no timer is running.
+  // `dozeMinutes` is the configured duration (15/30/60/90); `dozeEndAt`
+  // is the epoch ms at which the timer expires. The audio engine owns the
+  // actual fade + stop scheduling; the store just tracks UI state so the
+  // doze plaque can render the countdown.
+  dozeMinutes: number;
+  dozeEndAt: number;
+
+  // Scan / serendipity (M13). When true, a setInterval drifts the dial to
+  // a random station every SCAN_PERIOD_MS until the user manually tunes or
+  // toggles scan off.
+  scanning: boolean;
+
   // user intent — true when Power is on, independent of stream success
   isOn: boolean;
 
@@ -65,6 +85,14 @@ export interface RadioState {
 
   // --- actions ---
   hydrate: () => Promise<void>;
+  /**
+   * Idempotent data repair: any seed-default group that exists in the user's
+   * library but has zero memberships gets its seed memberships restored
+   * (and any missing seed stations re-added). Cheap no-op when nothing is
+   * empty. Called after hydration and after any cloud snapshot is applied
+   * — guards against a corrupted/partial sync that left a default band bare.
+   */
+  restoreEmptySeedBands: () => Promise<void>;
   setUser: (u: AppUser | null) => void;
   /**
    * Replace the local data slices with a cloud snapshot and persist to
@@ -85,11 +113,23 @@ export interface RadioState {
 
   setVolume: (v: number) => void;
 
+  // Tone (M13)
+  setBass: (db: number) => void;
+  setTreble: (db: number) => void;
+
+  // Doze (M13). 0 cancels. Otherwise the engine schedules the fade + stop.
+  setDoze: (minutes: number) => void;
+
+  // Scan (M13). Toggles serendipity drift across all bands.
+  setScanning: (active: boolean) => void;
+
   setSearchOpen: (v: boolean) => void;
   setMenuOpen: (v: boolean) => void;
   setStationListOpen: (v: boolean) => void;
   setAccountOpen: (v: boolean) => void;
   setAboutOpen: (v: boolean) => void;
+  setSuggestionBoxOpen: (v: boolean) => void;
+  setDetailOpen: (v: boolean) => void;
 
   // station/group mutations (M3)
   // Returns true if the station was newly added to the group, false if it was
@@ -134,13 +174,69 @@ function schedulePersist(get: () => RadioState) {
       activeGroupId: s.activeGroupId,
       currentStationId: s.currentStationId,
       volume: s.volume,
+      bass: s.bass,
+      treble: s.treble,
       version: CURRENT_VERSION,
     };
     saveUserData(data);
     // Fire-and-forget cloud mirror. No-op when user is null (pre-auth) or
     // Supabase is misconfigured. Errors are logged inside syncToCloud.
+    // Tone settings (bass/treble) live only in IndexedDB right now — the
+    // cloud schema doesn't have a column for them yet.
     if (s.user) void syncToCloud(s.user.id, data);
   }, 400);
+}
+
+// --- scan / serendipity (M13) ---
+// Module-level interval so setScanning(true) and setScanning(false) can
+// idempotently start/stop a single drift loop without leaking timers across
+// store renders.
+const SCAN_PERIOD_MS = 12_000;
+let scanTimer: ReturnType<typeof setInterval> | null = null;
+
+function pickRandomStation(
+  state: { stations: Station[]; memberships: Membership[] },
+  excludeId: string | null,
+): Station | null {
+  // Restrict to stations that are members of *some* group — avoids drifting
+  // onto orphaned imports the user has implicitly removed from circulation.
+  const memberSet = new Set(state.memberships.map((m) => m.stationId));
+  const pool = state.stations.filter(
+    (s) => memberSet.has(s.id) && s.id !== excludeId,
+  );
+  if (pool.length === 0) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function startScanInterval(get: () => RadioState) {
+  stopScanInterval();
+  if (typeof window === "undefined") return;
+  // Fire one drift immediately so the user gets feedback that scan is on.
+  // We bypass setCurrentStation here because that action cancels scan as a
+  // safeguard against manual tunes — scan is the one caller for whom that
+  // safeguard is wrong.
+  const driftOnce = () => {
+    const s = get();
+    if (!s.scanning) return;
+    const next = pickRandomStation(s, s.currentStationId);
+    if (!next) return;
+    const nextGroup = s.memberships.find((m) => m.stationId === next.id);
+    const patch: Partial<RadioState> = { currentStationId: next.id };
+    if (nextGroup && nextGroup.groupId !== s.activeGroupId) {
+      patch.activeGroupId = nextGroup.groupId;
+    }
+    useRadioStore.setState(patch);
+    if (s.isOn) void s.play();
+  };
+  driftOnce();
+  scanTimer = setInterval(driftOnce, SCAN_PERIOD_MS);
+}
+
+function stopScanInterval() {
+  if (scanTimer) {
+    clearInterval(scanTimer);
+    scanTimer = null;
+  }
 }
 
 // --- helper: list stations in a group, ordered ---
@@ -170,6 +266,14 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   currentStationId: seedDefaults.currentStationId,
   volume: seedDefaults.volume,
 
+  bass: 0,
+  treble: 0,
+
+  dozeMinutes: 0,
+  dozeEndAt: 0,
+
+  scanning: false,
+
   isOn: false,
 
   playback: {
@@ -184,6 +288,8 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     stationListOpen: false,
     accountOpen: false,
     aboutOpen: false,
+    suggestionBoxOpen: false,
+    detailOpen: false,
   },
 
   hydrate: async () => {
@@ -203,11 +309,15 @@ export const useRadioStore = create<RadioState>((set, get) => ({
           typeof saved.volume === "number"
             ? saved.volume
             : seedDefaults.volume,
+        bass: typeof saved.bass === "number" ? saved.bass : 0,
+        treble: typeof saved.treble === "number" ? saved.treble : 0,
       });
     }
     // subscribe the store to audio engine status updates
     const engine = getAudioEngine();
     engine.setVolume(get().volume);
+    engine.setBass(get().bass);
+    engine.setTreble(get().treble);
     engine.subscribe((snap) => {
       set({
         playback: {
@@ -219,6 +329,70 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       });
     });
     set({ hydrated: true });
+  },
+
+  restoreEmptySeedBands: async () => {
+    const state = get();
+    const seedGroupIds = new Set(seedGroups.map((g) => g.id));
+    const userGroupIds = new Set(state.groups.map((g) => g.id));
+    const memberCountByGroup = new Map<string, number>();
+    for (const m of state.memberships) {
+      memberCountByGroup.set(
+        m.groupId,
+        (memberCountByGroup.get(m.groupId) ?? 0) + 1,
+      );
+    }
+
+    // Empty seed-default groups that still exist in the user's library.
+    const targetGroupIds = [...seedGroupIds].filter(
+      (gid) =>
+        userGroupIds.has(gid) && (memberCountByGroup.get(gid) ?? 0) === 0,
+    );
+
+    if (targetGroupIds.length === 0) return;
+
+    const stationMap = new Map(state.stations.map((s) => [s.id, s]));
+    const seedStationMap = new Map(seedStations.map((s) => [s.id, s]));
+    const newStations = [...state.stations];
+    const newMemberships = [...state.memberships];
+    let restored = 0;
+
+    for (const gid of targetGroupIds) {
+      const seedRows = seedMemberships
+        .filter((m) => m.groupId === gid)
+        .sort((a, b) => a.position - b.position);
+      seedRows.forEach((row, idx) => {
+        // Add station if missing.
+        if (!stationMap.has(row.stationId)) {
+          const seedStation = seedStationMap.get(row.stationId);
+          if (seedStation) {
+            newStations.push(seedStation);
+            stationMap.set(seedStation.id, seedStation);
+          } else {
+            return; // unreferenced — skip
+          }
+        }
+        newMemberships.push({
+          stationId: row.stationId,
+          groupId: gid,
+          position: idx,
+        });
+        restored += 1;
+      });
+    }
+
+    set({ stations: newStations, memberships: newMemberships });
+    schedulePersist(get);
+
+    // eslint-disable-next-line no-console
+    console.log(
+      "[restore] re-populated",
+      restored,
+      "memberships across",
+      targetGroupIds.length,
+      "empty seed band(s):",
+      targetGroupIds.join(", "),
+    );
   },
 
   setUser: (u) => set({ user: u }),
@@ -256,7 +430,13 @@ export const useRadioStore = create<RadioState>((set, get) => ({
 
   // Changes current station. If Power is on, auto-plays the new stream.
   // The optional autoplay param can force play regardless of Power state.
+  // Manual tune cancels any active scan — the user is taking the wheel.
   setCurrentStation: (id, autoplay = false) => {
+    if (get().scanning) {
+      // Module-level interval handles the actual stop; we just flip the flag.
+      stopScanInterval();
+      set({ scanning: false });
+    }
     set({ currentStationId: id });
     schedulePersist(get);
     if (autoplay || get().isOn) void get().play();
@@ -289,8 +469,17 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     await engine.play(s.streamUrl, s.streamType, s.corsOk ?? true);
   },
 
-  // Power off.
+  // Power off. Scan and doze are automatic features that don't make sense
+  // with the radio off, so cancel them too.
   pause: () => {
+    if (get().scanning) {
+      stopScanInterval();
+      set({ scanning: false });
+    }
+    if (get().dozeMinutes > 0) {
+      getAudioEngine().cancelDoze();
+      set({ dozeMinutes: 0, dozeEndAt: 0 });
+    }
     set({ isOn: false });
     getAudioEngine().pause();
   },
@@ -310,6 +499,54 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     schedulePersist(get);
   },
 
+  setBass: (db) => {
+    const clamped = Math.max(-12, Math.min(12, db));
+    set({ bass: clamped });
+    getAudioEngine().setBass(clamped);
+    schedulePersist(get);
+  },
+
+  setTreble: (db) => {
+    const clamped = Math.max(-12, Math.min(12, db));
+    set({ treble: clamped });
+    getAudioEngine().setTreble(clamped);
+    schedulePersist(get);
+  },
+
+  setDoze: (minutes) => {
+    const engine = getAudioEngine();
+    if (minutes <= 0) {
+      engine.cancelDoze();
+      set({ dozeMinutes: 0, dozeEndAt: 0 });
+      return;
+    }
+    // Make sure the radio is actually on — without playback there's nothing
+    // to fade out, and silently scheduling a stop on an idle deck would just
+    // be confusing.
+    if (!get().isOn) {
+      void get().play();
+    }
+    const totalSeconds = minutes * 60;
+    engine.startDoze(totalSeconds);
+    set({
+      dozeMinutes: minutes,
+      dozeEndAt: Date.now() + totalSeconds * 1000,
+    });
+  },
+
+  setScanning: (active) => {
+    const prev = get().scanning;
+    if (prev === active) return;
+    set({ scanning: active });
+    if (active) {
+      // Power on if not already, so the user hears the drift.
+      if (!get().isOn) void get().play();
+      startScanInterval(get);
+    } else {
+      stopScanInterval();
+    }
+  },
+
   setSearchOpen: (v) =>
     set((st) => ({ ui: { ...st.ui, searchOpen: v } })),
   setMenuOpen: (v) =>
@@ -320,6 +557,10 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     set((st) => ({ ui: { ...st.ui, accountOpen: v } })),
   setAboutOpen: (v) =>
     set((st) => ({ ui: { ...st.ui, aboutOpen: v } })),
+  setSuggestionBoxOpen: (v) =>
+    set((st) => ({ ui: { ...st.ui, suggestionBoxOpen: v } })),
+  setDetailOpen: (v) =>
+    set((st) => ({ ui: { ...st.ui, detailOpen: v } })),
 
   createGroup: (name) => {
     const trimmed = name.trim() || "Untitled";

@@ -1,0 +1,4 @@
+# Supabase Edge Functions run in Deno, not Node — they use Deno globals
+# that ESLint and TypeScript-in-Next would flag as unknown. They're deployed
+# separately to Supabase, not bundled with the Next app.
+supabase/functions/**

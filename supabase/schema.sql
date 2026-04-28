@@ -178,3 +178,50 @@ create policy "user_settings_update_own" on public.user_settings
   for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "user_settings_delete_own" on public.user_settings
   for delete using (auth.uid() = user_id);
+
+-- ============================================================================
+-- Suggestions (M12.5)
+--
+-- A write-only inbox for user feedback: station nominations for the default
+-- seed, plus general suggestions. Read access is service-role only (i.e.
+-- David reading from the Supabase dashboard) — no anon/auth select policy
+-- exists, so RLS denies reads from the browser.
+-- ============================================================================
+
+create table if not exists public.suggestions (
+  id            uuid        primary key default gen_random_uuid(),
+  -- Nullable: set when the submitter has a Supabase session (anon or
+  -- permanent), null otherwise. on delete set null so a user signing out
+  -- doesn't drop their suggestions from the inbox.
+  user_id       uuid        references auth.users(id) on delete set null,
+  kind          text        not null check (kind in ('station','other')),
+  -- station fields (used when kind='station')
+  station_name  text,
+  station_url   text,
+  station_notes text,
+  -- other fields (used when kind='other')
+  message       text,
+  -- optional contact email for follow-up — independent of the user's auth
+  -- email, since signed-in users may want to suggest under a different
+  -- address (or none).
+  contact_email text,
+  -- meta
+  user_agent    text,
+  created_at    timestamptz not null default now()
+);
+
+create index if not exists suggestions_created_at_idx
+  on public.suggestions (created_at desc);
+
+alter table public.suggestions enable row level security;
+
+drop policy if exists "suggestions_insert_any" on public.suggestions;
+-- INSERT-only from the browser. user_id must either be null (best-effort) or
+-- match the caller's auth.uid() so people can't impersonate other users'
+-- suggestions. No SELECT/UPDATE/DELETE policy exists, so the anon key cannot
+-- read or modify rows — only the service-role key (used from the dashboard)
+-- can.
+create policy "suggestions_insert_any" on public.suggestions
+  for insert with check (
+    user_id is null or auth.uid() = user_id
+  );

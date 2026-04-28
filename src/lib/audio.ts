@@ -12,13 +12,23 @@
 // Audio graph:
 //
 //   slot[0].el → mes → mix(0|1) ──┐
-//                                  ├→ analyser → masterGain → destination
+//                                  ├→ analyser → bass → treble → masterGain → destination
 //   slot[1].el → mes → mix(1|0) ──┘
 //
 // Why per-slot mix gains: createMediaElementSource can only be called once
 // per element, so both slots must be wired permanently at context init.
 // Switching between them is just a 50ms gain crossfade — no graph rewiring,
 // no audible click. masterGain holds the user's volume independently.
+//
+// Tone (M13): two BiquadFilterNodes — `bass` (lowshelf, 200Hz) and `treble`
+// (highshelf, 4kHz) — sit between the analyser and masterGain. Both default
+// to 0dB (transparent). The analyser stays *above* the filters so the VU
+// meter reflects the source signal, not the post-EQ signal.
+//
+// Doze (M13): `dozeGain` is a separate GainNode chained after masterGain,
+// 1.0 normally, ramped to 0 over the last 30s of an active sleep timer.
+// Keeping it separate from masterGain means the user can still adjust the
+// volume knob during a fade-out without breaking the ramp envelope.
 //
 // CORS: streams whose origin lacks permissive CORS are routed through
 // /api/stream (or /api/hls for HLS). Same-origin proxied responses are
@@ -67,8 +77,25 @@ class AudioEngine {
 
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  private bassFilter: BiquadFilterNode | null = null;
+  private trebleFilter: BiquadFilterNode | null = null;
   private masterGain: GainNode | null = null;
+  private dozeGain: GainNode | null = null;
   private timeBuf: Uint8Array<ArrayBuffer> | null = null;
+
+  // Tone (M13). Stored in dB so they survive context (re)init, and applied
+  // to the BiquadFilterNodes once `ensureContext` has built the graph.
+  private bassDb = 0;
+  private trebleDb = 0;
+
+  // Doze / sleep timer (M13). Singleton across the engine — only one can
+  // be running at a time. `dozeStopTimer` is the hard-stop (call pause()
+  // and clear intent) scheduled for the END of the duration; `dozeFadeStart`
+  // is the absolute timestamp at which masterGain begins its 30s ramp to 0.
+  private dozeStopTimer: ReturnType<typeof setTimeout> | null = null;
+  private dozeFadeStart = 0;
+  private dozeEndAt = 0;
+  private static readonly DOZE_FADE_S = 30;
 
   private listeners = new Set<Listener>();
   private snapshot: AudioSnapshot = { status: "idle", meterAvailable: false };
@@ -284,6 +311,126 @@ class AudioEngine {
 
   getVolume(): number {
     return this.volume;
+  }
+
+  // --- Tone (M13) ---
+
+  /** Set bass shelf gain in dB. Clamped to ±12dB. */
+  setBass(db: number): void {
+    const clamped = Math.max(-12, Math.min(12, db));
+    this.bassDb = clamped;
+    if (this.bassFilter && this.ctx) {
+      this.bassFilter.gain.setTargetAtTime(
+        clamped,
+        this.ctx.currentTime,
+        0.02,
+      );
+    }
+  }
+
+  /** Set treble shelf gain in dB. Clamped to ±12dB. */
+  setTreble(db: number): void {
+    const clamped = Math.max(-12, Math.min(12, db));
+    this.trebleDb = clamped;
+    if (this.trebleFilter && this.ctx) {
+      this.trebleFilter.gain.setTargetAtTime(
+        clamped,
+        this.ctx.currentTime,
+        0.02,
+      );
+    }
+  }
+
+  getBass(): number {
+    return this.bassDb;
+  }
+
+  getTreble(): number {
+    return this.trebleDb;
+  }
+
+  // --- Doze / sleep timer (M13) ---
+
+  /**
+   * Start a sleep timer. Audio plays unchanged for (totalSeconds - 30s),
+   * then masterGain fades to 0 over the final 30s, then we pause and clear
+   * intentPlaying so reconnect logic doesn't kick in.
+   *
+   * Calling this while another timer is active replaces it (the new timer
+   * starts from now). Call `cancelDoze()` to abort cleanly.
+   *
+   * Returns `false` if totalSeconds <= 0 (no-op).
+   */
+  startDoze(totalSeconds: number): boolean {
+    if (totalSeconds <= 0) return false;
+    this.cancelDoze();
+
+    const fadeS = AudioEngine.DOZE_FADE_S;
+    const now = performance.now();
+    const fadeAt = now + Math.max(0, (totalSeconds - fadeS)) * 1000;
+    const stopAt = now + totalSeconds * 1000;
+    this.dozeFadeStart = fadeAt;
+    this.dozeEndAt = stopAt;
+
+    // Schedule the audio-context fade ramp at the right wall-clock moment.
+    // Done inside a setTimeout so it lines up with the timer-card UI.
+    const fadeDelay = Math.max(0, fadeAt - now);
+    setTimeout(() => {
+      // Bail if user cancelled or restarted in the meantime.
+      if (this.dozeFadeStart !== fadeAt) return;
+      if (this.dozeGain && this.ctx) {
+        const t = this.ctx.currentTime;
+        const target = Math.max(0.0001, fadeS); // avoid 0-second ramp
+        try {
+          this.dozeGain.gain.cancelScheduledValues(t);
+          this.dozeGain.gain.setValueAtTime(this.dozeGain.gain.value, t);
+          this.dozeGain.gain.linearRampToValueAtTime(0, t + target);
+        } catch {}
+      }
+    }, fadeDelay);
+
+    this.dozeStopTimer = setTimeout(() => {
+      this.dozeStopTimer = null;
+      // End of timer — stop playback and reset doze gain so the next play()
+      // isn't silenced.
+      this.intentPlaying = false;
+      this.stop();
+      if (this.dozeGain && this.ctx) {
+        try {
+          this.dozeGain.gain.cancelScheduledValues(this.ctx.currentTime);
+          this.dozeGain.gain.setValueAtTime(1, this.ctx.currentTime);
+        } catch {}
+      }
+      this.dozeFadeStart = 0;
+      this.dozeEndAt = 0;
+    }, totalSeconds * 1000);
+
+    return true;
+  }
+
+  /** Cancel any active doze timer and restore master volume. */
+  cancelDoze(): void {
+    if (this.dozeStopTimer) {
+      clearTimeout(this.dozeStopTimer);
+      this.dozeStopTimer = null;
+    }
+    this.dozeFadeStart = 0;
+    this.dozeEndAt = 0;
+    if (this.dozeGain && this.ctx) {
+      const t = this.ctx.currentTime;
+      try {
+        this.dozeGain.gain.cancelScheduledValues(t);
+        // 50ms fade back up to 1 — if we're mid-fade, this avoids a click.
+        this.dozeGain.gain.setValueAtTime(this.dozeGain.gain.value, t);
+        this.dozeGain.gain.linearRampToValueAtTime(1, t + 0.05);
+      } catch {}
+    }
+  }
+
+  /** Returns ms remaining on the active doze timer, or 0 if none. */
+  getDozeRemainingMs(): number {
+    if (!this.dozeEndAt) return 0;
+    return Math.max(0, this.dozeEndAt - performance.now());
   }
 
   // RMS of current analyser window, 0..1. The analyser sits downstream of
@@ -613,13 +760,35 @@ class AudioEngine {
         this.analyser = this.ctx.createAnalyser();
         this.analyser.fftSize = 1024;
         this.timeBuf = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
+
+        // Tone — lowshelf (bass) at 200Hz, highshelf (treble) at 4kHz.
+        // ±12dB range. 0dB = transparent (default).
+        this.bassFilter = this.ctx.createBiquadFilter();
+        this.bassFilter.type = "lowshelf";
+        this.bassFilter.frequency.value = 200;
+        this.bassFilter.gain.value = this.bassDb;
+        this.trebleFilter = this.ctx.createBiquadFilter();
+        this.trebleFilter.type = "highshelf";
+        this.trebleFilter.frequency.value = 4000;
+        this.trebleFilter.gain.value = this.trebleDb;
+
         this.masterGain = this.ctx.createGain();
         this.masterGain.gain.value = this.volume * this.volume;
-        // Both slot mixes feed the shared analyser → masterGain → out chain.
+
+        // Doze fade gain — 1.0 normally; ramped to 0 over the last 30s of
+        // an active sleep timer. Independent of masterGain so volume knob
+        // adjustments during a fade don't reset the envelope.
+        this.dozeGain = this.ctx.createGain();
+        this.dozeGain.gain.value = 1;
+
+        // Chain: slot mixes → analyser → bass → treble → masterGain → dozeGain → out
         this.slots[0].mix!.connect(this.analyser);
         this.slots[1].mix!.connect(this.analyser);
-        this.analyser.connect(this.masterGain);
-        this.masterGain.connect(this.ctx.destination);
+        this.analyser.connect(this.bassFilter);
+        this.bassFilter.connect(this.trebleFilter);
+        this.trebleFilter.connect(this.masterGain);
+        this.masterGain.connect(this.dozeGain);
+        this.dozeGain.connect(this.ctx.destination);
         // Now that masterGain owns volume, reset element-level volume to 1
         // so the chain isn't compounding (out * out).
         for (const slot of this.slots) {

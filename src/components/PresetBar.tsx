@@ -207,16 +207,51 @@ export default function PresetBar() {
         <VerticalBrassLabel text="Bands" />
       </div>
 
-      {/* "New Band" plaque — centered maker-plate styled after the cabinet's
-          top plaque, but sized to match the preset-button text. Replaces the
-          former "+" preset in the groups scroller. */}
+      {/* "New Band" plaque — dark walnut base with brass engraved text and a
+          brass "+" glyph. Visual sibling to the preset buttons (it creates one,
+          after all) and reads cleanly without the brass-on-brass wash-out the
+          M5 maker-plate styling produced. */}
       <div className="flex justify-center mt-2">
         <button
           type="button"
           onClick={() => setCreatingGroup(true)}
-          className="px-3 py-0.5 rounded-full surface-brass text-walnut-900 font-display text-[11px] sm:text-xs tracking-[0.25em] uppercase transition-transform active:translate-y-[1px]"
           aria-label="Create a new band"
+          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-display uppercase tracking-[0.22em] text-[11px] sm:text-xs transition-transform active:translate-y-[1px]"
+          style={{
+            color: "#e8d6a8",
+            background: "linear-gradient(180deg, #2a1810 0%, #120a04 100%)",
+            border: "1px solid rgba(0,0,0,0.7)",
+            boxShadow:
+              "inset 0 1px 1px rgba(255,200,140,0.18), inset 0 -2px 3px rgba(0,0,0,0.6), 0 2px 3px rgba(0,0,0,0.45)",
+            textShadow: "0 1px 0 rgba(0,0,0,0.55)",
+          }}
         >
+          <svg
+            aria-hidden
+            width="11"
+            height="11"
+            viewBox="0 0 11 11"
+            fill="none"
+          >
+            <line
+              x1="5.5"
+              y1="1.5"
+              x2="5.5"
+              y2="9.5"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
+            <line
+              x1="1.5"
+              y1="5.5"
+              x2="9.5"
+              y2="5.5"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
+          </svg>
           New Band
         </button>
       </div>
