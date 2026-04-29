@@ -43,13 +43,18 @@ function useNowPlaying(streamUrl: string | undefined): string | null {
 }
 
 /**
- * ScrollingCaption — displays text; if it overflows the container, it scrolls
+ * ScrollingCaption — displays text; if it overflows the container it animates
  * as a seamless marquee (two copies + CSS keyframe translating -50%).
- * Falls back to truncate when the text fits.
+ *
+ * When the user has `prefers-reduced-motion: reduce` set, we skip the marquee
+ * (the global reduced-motion CSS rule overrides animation-duration to ~0,
+ * which would turn an *infinite* animation into a 100kHz strobe rather than
+ * a stationary string) and instead render a single copy that the user can
+ * click-and-drag horizontally to read the full caption at their own pace.
  *
  * The whole pill is wired as a button when `onClick` is provided — clicking
- * it opens the Station Detail card (M13). When there's no station tuned
- * yet, the prop is omitted and the pill renders as a plain div.
+ * (without dragging) opens the Station Detail card. When there's no station
+ * tuned yet, the prop is omitted and the pill renders as a plain div.
  */
 function ScrollingCaption({
   text,
@@ -62,37 +67,97 @@ function ScrollingCaption({
   const measureRef = useRef<HTMLSpanElement>(null);
   const [overflow, setOverflow] = useState(false);
   const [duration, setDuration] = useState(20);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [maxPan, setMaxPan] = useState(0); // ≤ 0; minimum allowed translateX
+  const [pan, setPan] = useState(0); // resting translateX (drag-mode only)
+  const [drag, setDrag] = useState<{
+    start: number;
+    base: number;
+    current: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const DRAG_THRESHOLD = 5; // px before a tap becomes a drag
 
   useLayoutEffect(() => {
     const outer = outerRef.current;
     const m = measureRef.current;
     if (!outer || !m) return;
 
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReducedMotion(mq.matches);
+    const onMq = () => setReducedMotion(mq.matches);
+    mq.addEventListener("change", onMq);
+
     const check = () => {
       const w = m.scrollWidth;
       const c = outer.clientWidth;
-      const needs = w > c + 1;
+      // px-4 padding eats 16px on each side; the actual content area:
+      const visible = c - 32;
+      const needs = w > visible + 1;
       setOverflow(needs);
-      // ~50px/sec feels like a period-appropriate ticker; min 12s so short
-      // overflows don't whip past too fast.
-      if (needs) setDuration(Math.max(12, w / 50));
+      if (needs) {
+        // ~50px/sec feels like a period-appropriate ticker; min 12s so short
+        // overflows don't whip past too fast.
+        setDuration(Math.max(12, w / 50));
+        const newMax = visible - w; // negative — leftmost allowed translate
+        setMaxPan(newMax);
+        // Re-clamp the current pan if bounds shrank (window resize, etc.).
+        setPan((p) => Math.min(0, Math.max(newMax, p)));
+      } else {
+        setMaxPan(0);
+        setPan(0);
+      }
     };
     check();
-    // Web fonts may still be loading on first paint; their swap changes the
+    // Web fonts may still be loading on first paint; the swap changes the
     // measurer's intrinsic width without changing the pill's clientWidth,
-    // so the ResizeObserver below wouldn't catch it. Re-measure once fonts
-    // settle. (Manifests on machines where a corporate VPN delays the WOFF2
-    // fetch enough that initial measurement happens against a fallback font
-    // — Times-on-Windows is much narrower than Cormorant Garamond, so the
-    // cached duration ends up wildly short once the real font swaps in.)
+    // so re-measure once fonts settle.
     document.fonts?.ready?.then(check);
     const ro = new ResizeObserver(check);
     ro.observe(outer);
     ro.observe(m); // catch any inner-width changes (font swap, zoom, reflow)
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      mq.removeEventListener("change", onMq);
+    };
+  }, [text]);
+
+  // When the station changes, reset pan so the new caption starts at the left.
+  useLayoutEffect(() => {
+    setPan(0);
   }, [text]);
 
   const sep = "\u00a0\u00a0•\u00a0\u00a0";
+  const dragMode = reducedMotion && overflow;
+  const currentPan = drag ? drag.current : pan;
+  const clamp = (t: number) => Math.min(0, Math.max(maxPan, t));
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragMode) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag({ start: e.clientX, base: pan, current: pan, moved: false });
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.start;
+    const next = clamp(drag.base + dx);
+    const moved = drag.moved || Math.abs(dx) > DRAG_THRESHOLD;
+    setDrag({ ...drag, current: next, moved });
+  };
+  const endDrag = () => {
+    if (!drag) return;
+    setPan(drag.current);
+    if (drag.moved) {
+      // Swallow the click that follows pointerup so a drag-release doesn't
+      // also fire the station-detail-card open.
+      suppressClickRef.current = true;
+      requestAnimationFrame(() => {
+        suppressClickRef.current = false;
+      });
+    }
+    setDrag(null);
+  };
 
   // The pill itself stays a div for clean ref typing; we layer an absolutely
   // positioned button over it when interactive, so the click target is the
@@ -103,8 +168,27 @@ function ScrollingCaption({
       className={`relative max-w-full overflow-hidden px-4 py-1 rounded-full bg-walnut-900/40 text-ink font-display italic text-xs sm:text-sm tracking-wide ${
         onClick ? "hover:bg-walnut-900/55 transition-colors" : ""
       }`}
+      style={
+        dragMode
+          ? { cursor: drag ? "grabbing" : "grab", touchAction: "pan-y" }
+          : undefined
+      }
+      onPointerDown={dragMode ? onPointerDown : undefined}
+      onPointerMove={dragMode ? onPointerMove : undefined}
+      onPointerUp={dragMode ? endDrag : undefined}
+      onPointerCancel={dragMode ? endDrag : undefined}
     >
-      {overflow ? (
+      {dragMode ? (
+        <div
+          className="whitespace-nowrap"
+          style={{
+            transform: `translateX(${currentPan}px)`,
+            transition: drag ? "none" : "transform 220ms ease-out",
+          }}
+        >
+          {text}
+        </div>
+      ) : overflow ? (
         <div
           className="inline-flex whitespace-nowrap"
           style={{ animation: `marquee ${duration}s linear infinite` }}
@@ -133,11 +217,24 @@ function ScrollingCaption({
       {onClick && (
         <button
           type="button"
-          onClick={onClick}
+          onClick={() => {
+            if (suppressClickRef.current) return;
+            onClick();
+          }}
           aria-label="Show station details"
-          title="Show station details"
-          className="absolute inset-0 cursor-pointer"
-          style={{ background: "transparent" }}
+          title={
+            dragMode
+              ? "Drag to scroll · Click for station details"
+              : "Show station details"
+          }
+          className="absolute inset-0"
+          style={{
+            background: "transparent",
+            // While the user is mid-drag, the button must not steal the
+            // pointer events from the parent — same pattern the dial strip uses.
+            pointerEvents: drag ? "none" : "auto",
+            cursor: dragMode ? (drag ? "grabbing" : "grab") : "pointer",
+          }}
         />
       )}
     </div>
