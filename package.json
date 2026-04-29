@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.104.0",
+    "@vercel/analytics": "^2.0.1",
     "framer-motion": "^11.11.9",
     "hls.js": "^1.6.16",
     "idb-keyval": "^6.2.1",

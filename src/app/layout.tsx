@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Cormorant_Garamond, Inter, DM_Serif_Display } from "next/font/google";
+import { Analytics } from "@vercel/analytics/react";
 import "./globals.css";
 import StoreHydrator from "@/components/StoreHydrator";
 import RotateOverlay from "@/components/RotateOverlay";
@@ -32,6 +33,7 @@ export default function RootLayout({
       <body className="font-sans text-ivory-dial antialiased">
         <StoreHydrator>{children}</StoreHydrator>
         <RotateOverlay />
+        <Analytics />
       </body>
     </html>
   );
