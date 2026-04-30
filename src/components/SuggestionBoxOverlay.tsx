@@ -57,7 +57,6 @@ const SEARCH_MIN_QUERY = 2;
 export default function SuggestionBoxOverlay() {
   const open = useRadioStore((s) => s.ui.suggestionBoxOpen);
   const setOpen = useRadioStore((s) => s.setSuggestionBoxOpen);
-  const user = useRadioStore((s) => s.user);
 
   const [tab, setTab] = useState<Tab>("station");
   // shared
@@ -222,10 +221,18 @@ export default function SuggestionBoxOverlay() {
       return;
     }
 
+    // user_id is intentionally always null on the suggestion row. The RLS
+    // policy on `public.suggestions` permits INSERT when (user_id is null OR
+    // auth.uid() = user_id) — by always taking the first branch we make
+    // submissions robust to client-side auth state (stale session, expired
+    // JWT, anon-signin disabled / failed, iOS Safari ITP, etc). The row is
+    // write-only from the browser anyway, so user attribution on the row
+    // only matters for the dashboard view; contact_email + user_agent
+    // already cover follow-up needs.
     const row =
       tab === "station"
         ? {
-            user_id: user?.id ?? null,
+            user_id: null,
             kind: "station" as const,
             station_name: stationName.trim(),
             station_url: stationUrl.trim(),
@@ -238,7 +245,7 @@ export default function SuggestionBoxOverlay() {
                 : null,
           }
         : {
-            user_id: user?.id ?? null,
+            user_id: null,
             kind: "other" as const,
             station_name: null,
             station_url: null,
@@ -253,11 +260,14 @@ export default function SuggestionBoxOverlay() {
 
     const { error } = await sb.from("suggestions").insert(row);
     if (error) {
+      // Log the real error for diagnosis but show users a friendly message
+      // so they don't see raw Postgres / RLS strings.
+      // eslint-disable-next-line no-console
+      console.error("[suggestions] insert failed:", error.message);
       setStatus({
         kind: "error",
         message:
-          error.message ||
-          "Something went amiss. Please try again in a moment.",
+          "Couldn't deliver your card. Please try again in a moment.",
       });
       return;
     }
