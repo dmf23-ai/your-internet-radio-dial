@@ -14,16 +14,20 @@
  * the centered/flat position legible at a glance.
  */
 
+import { useEffect, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { useRotaryKnob } from "@/lib/useRotaryKnob";
+import { isIos } from "@/lib/isIos";
 
 interface ToneKnobProps {
   label: string;
   value: number;
   onChange: (v: number) => void;
+  disabled?: boolean;
+  disabledTitle?: string;
 }
 
-function ToneKnob({ label, value, onChange }: ToneKnobProps) {
+function ToneKnob({ label, value, onChange, disabled = false, disabledTitle }: ToneKnobProps) {
   // Snap-to-zero detent: anything within ±0.75 dB of flat reads as flat.
   const detentSnap = (v: number) => (Math.abs(v) < 0.75 ? 0 : v);
 
@@ -49,9 +53,30 @@ function ToneKnob({ label, value, onChange }: ToneKnobProps) {
           Number.isInteger(value) ? value : value.toFixed(1)
         }`;
 
+  // When disabled (iOS — masterGain is silent due to the WebKit MES bug, so
+  // BiquadFilter changes are inaudible), the knob is non-interactive, dimmed,
+  // and surfaces a tooltip explaining why.
   return (
-    <div className="flex flex-col items-center gap-1 select-none">
-      <div className="relative" style={{ width: 92, height: 80 }}>
+    <div
+      className="flex flex-col items-center gap-1 select-none"
+      title={disabled ? disabledTitle : undefined}
+      style={{ opacity: disabled ? 0.4 : 1 }}
+    >
+      <div
+        className="relative"
+        style={{
+          width: 92,
+          height: 80,
+          pointerEvents: disabled ? "none" : undefined,
+        }}
+      >
+        {disabled && (
+          <span
+            aria-hidden
+            className="absolute inset-0 z-10"
+            style={{ cursor: "not-allowed" }}
+          />
+        )}
         {/* tick dots: 5 marks across the arc, with a brighter "0" at top */}
         {Array.from({ length: 5 }).map((_, i) => {
           const a = -135 + i * 67.5;
@@ -152,10 +177,31 @@ export default function TonePanel() {
   const setBass = useRadioStore((s) => s.setBass);
   const setTreble = useRadioStore((s) => s.setTreble);
 
+  // Detect iOS lazily so SSR / first render doesn't see `true` and emit a
+  // hydration-mismatched DOM (iOS detection requires `navigator`, which only
+  // exists client-side). Default false → matches the SSR pass; effect flips
+  // it on the iOS render after hydration.
+  const [iosDisabled, setIosDisabled] = useState(false);
+  useEffect(() => setIosDisabled(isIos()), []);
+
+  const tooltip = "Bass and Treble are not available on iPhone";
+
   return (
     <div className="flex items-center gap-3 sm:gap-4">
-      <ToneKnob label="Bass" value={bass} onChange={setBass} />
-      <ToneKnob label="Treble" value={treble} onChange={setTreble} />
+      <ToneKnob
+        label="Bass"
+        value={bass}
+        onChange={setBass}
+        disabled={iosDisabled}
+        disabledTitle={tooltip}
+      />
+      <ToneKnob
+        label="Treble"
+        value={treble}
+        onChange={setTreble}
+        disabled={iosDisabled}
+        disabledTitle={tooltip}
+      />
     </div>
   );
 }

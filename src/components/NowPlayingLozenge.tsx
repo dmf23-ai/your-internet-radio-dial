@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
+import { isIos } from "@/lib/isIos";
 
 /**
  * NowPlayingLozenge — tap-to-identify song-ID plaque (M18).
@@ -51,7 +52,13 @@ type State =
   | { kind: "unknown" }
   | { kind: "error"; message: string };
 
-function bodyText(state: State, isPlaying: boolean): string {
+function bodyText(state: State, isPlaying: boolean, iosMode: boolean): string {
+  // iOS — song-ID capture depends on the WebAudio analyser tap, which is
+  // silent on iOS Safari (WebKit MES bug). Show a fixed message and ignore
+  // state transitions; the tap handler is also disabled in this mode.
+  if (iosMode) {
+    return "Song identification not available on iPhone";
+  }
   // Gate the body text on isPlaying *before* the state machine, so the
   // user sees a clear "tune in first" cue instead of a cryptic error
   // when the radio is off.
@@ -94,6 +101,10 @@ export default function NowPlayingLozenge() {
   // instead of pulsing AND the cream-window marquee is replaced with a
   // truncated single copy.
   const [reducedMotion, setReducedMotion] = useState(false);
+  // iOS gate — see bodyText for the underlying reason. Detected after
+  // hydration to keep SSR markup consistent.
+  const [iosMode, setIosMode] = useState(false);
+  useEffect(() => setIosMode(isIos()), []);
   const inFlightRef = useRef(false);
 
   // Marquee state for the cream window — when the body text is wider than
@@ -140,7 +151,7 @@ export default function NowPlayingLozenge() {
 
   // Pre-compute the body string here (rather than below the JSX) so the
   // overflow measurement effect can depend on it.
-  const body = bodyText(state, isPlaying);
+  const body = bodyText(state, isPlaying, iosMode);
 
   // Measure the body text against the visible cream-window width. When it
   // overflows, switch to a marquee (two copies + global @keyframes marquee
@@ -191,6 +202,11 @@ export default function NowPlayingLozenge() {
     // Same one-frame window mechanism the dial caption uses.
     if (suppressClickRef.current) return;
     if (inFlightRef.current) return;
+    // iOS — capture pipeline can't produce decodable audio (analyser tap is
+    // silent), so don't even attempt it. The disabled button below also
+    // prevents this path from firing, but keep this guard as defense in
+    // depth in case a future change re-enables the click handler.
+    if (iosMode) return;
     if (!stationId) {
       setState({ kind: "error", message: "no station" });
       return;
@@ -204,22 +220,10 @@ export default function NowPlayingLozenge() {
     setState({ kind: "listening" });
 
     try {
-      // M20 diagnostic: sample the parallel captureStream tap at the same
-      // time as the existing analyser-tap capture, so the resulting `cs=…`
-      // value reflects whatever captureStream was carrying during the same
-      // 8s window. On iOS, peak from the existing tap (`pk=`) is expected
-      // to be 0; if `cs=` is non-zero, M20 (captureStream rewire) is viable.
-      const engine = getAudioEngine();
-      const [cap, csDiag] = await Promise.all([
-        engine.captureAudioClip(CAPTURE_SECONDS),
-        engine.sampleCaptureStreamDiag(CAPTURE_SECONDS * 1000),
-      ]);
+      const cap = await getAudioEngine().captureAudioClip(CAPTURE_SECONDS);
       const { blob, peakAmplitude, durationMs, fireCount } = cap;
       const sizeKb = (blob.size / 1024).toFixed(0);
-      const csStr = csDiag.supported
-        ? ` cs=${csDiag.peak.toFixed(2)}(${csDiag.trackState})`
-        : ` cs=N/A(${csDiag.error ?? "?"})`;
-      const stats = `${sizeKb}KB ${durationMs}ms pk=${peakAmplitude.toFixed(2)} n=${fireCount}${csStr}`;
+      const stats = `${sizeKb}KB ${durationMs}ms pk=${peakAmplitude.toFixed(2)} n=${fireCount}`;
       // eslint-disable-next-line no-console
       console.log("[song-id] capture:", stats);
 
@@ -273,9 +277,11 @@ export default function NowPlayingLozenge() {
     }
   }
 
-  // Tappable only when (a) not currently in flight AND (b) the radio is on.
-  // When off, the lozenge dims and the body cue tells the user to tune in.
-  const tappable = state.kind !== "listening" && isPlaying;
+  // Tappable only when (a) not currently in flight AND (b) the radio is on
+  // AND (c) we're not on iOS (where capture is silently broken — see the
+  // bodyText / onTap guards). When off, the lozenge dims and the body cue
+  // tells the user to tune in.
+  const tappable = state.kind !== "listening" && isPlaying && !iosMode;
   const marquee = bodyOverflow && !reducedMotion;
   // Drag-to-pan mode is the reduced-motion fallback for overflow text —
   // mirrors the dial caption's behavior. dragMode and marquee are mutually
@@ -318,11 +324,17 @@ export default function NowPlayingLozenge() {
         type="button"
         onClick={tappable ? onTap : undefined}
         disabled={!tappable}
-        aria-label="Now playing — tap to identify the current song"
+        aria-label={
+          iosMode
+            ? "Now playing — song identification is not available on iPhone"
+            : "Now playing — tap to identify the current song"
+        }
         title={
-          dragMode
-            ? "Drag the cream window to scroll · Tap to identify the current song"
-            : "Tap to identify the current song"
+          iosMode
+            ? "Song identification not available on iPhone"
+            : dragMode
+              ? "Drag the cream window to scroll · Tap to identify the current song"
+              : "Tap to identify the current song"
         }
         className="relative w-[260px] sm:w-[320px] transition-[transform,opacity] active:translate-y-[1px] disabled:active:translate-y-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60"
         style={{
@@ -333,10 +345,11 @@ export default function NowPlayingLozenge() {
           boxShadow:
             "inset 0 1px 2px rgba(255,240,200,0.7), inset 0 -2px 3px rgba(0,0,0,0.5), 0 4px 8px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.5)",
           cursor: tappable ? "pointer" : "default",
-          // Dim the whole plate when the radio is off so the disabled state
-          // reads at a glance — same visual cue we use elsewhere for inert
+          // Dim the whole plate when the radio is off OR on iOS (where the
+          // feature is permanently unavailable) so the disabled state reads
+          // at a glance — same visual cue we use elsewhere for inert
           // controls. Brass-on-walnut at full opacity always looks "on".
-          opacity: !isPlaying ? 0.55 : 1,
+          opacity: !isPlaying || iosMode ? 0.55 : 1,
         }}
       >
         {/* Four corner screws — visual rhyme with the Suggestion Box */}

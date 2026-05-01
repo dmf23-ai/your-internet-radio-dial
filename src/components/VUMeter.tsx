@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
+import { isIos } from "@/lib/isIos";
 
 /**
  * VUMeter — analog level meter.
@@ -112,7 +113,15 @@ export default function VUMeter() {
     };
   }, [status, meterAvailable, cx, cy]);
 
+  // iOS: the analyser receives zero samples (WebKit MES bug), so the meter
+  // would always be parked — show a permanent "VU meter not available on
+  // iPhone" overlay rather than the sometimes-pulsing/sometimes-zero
+  // ambiguity. Detected after hydration to keep SSR markup consistent.
+  const [iosMode, setIosMode] = useState(false);
+  useEffect(() => setIosMode(isIos()), []);
+
   const showMeterBadge =
+    !iosMode &&
     (status === "playing" || status === "buffering") &&
     (!meterAvailable || suspectBlocked);
 
@@ -213,6 +222,28 @@ export default function VUMeter() {
             >
               meter unavailable
             </span>
+          )}
+          {/* iOS overlay — covers the dial face with a clear, two-line
+              explanation. Grey ink on the cream meter face matches the
+              "engraved on the panel" reading; pointer-events:none so the
+              underlying SVG is still inspectable in DevTools. */}
+          {iosMode && (
+            <div
+              className="absolute inset-0 flex items-center justify-center text-center px-2 pointer-events-none"
+              style={{
+                color: "rgba(26, 18, 10, 0.55)",
+                background:
+                  "radial-gradient(ellipse at 50% 50%, rgba(243,229,196,0.55) 0%, rgba(243,229,196,0.2) 70%, rgba(243,229,196,0) 100%)",
+              }}
+            >
+              <span className="font-display uppercase tracking-[0.18em] text-[9px] leading-[1.4]">
+                VU meter
+                <br />
+                not available
+                <br />
+                on iPhone
+              </span>
+            </div>
           )}
         </div>
       </div>

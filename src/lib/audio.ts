@@ -67,6 +67,7 @@
 // so it obeys the user's volume + tone + Doze fade and drives the VU meter.
 
 import type { StreamType } from "@/data/seed";
+import { isIos } from "./isIos";
 
 export type AudioStatus =
   | "idle"
@@ -121,14 +122,7 @@ function encodeWavMono16(samples: Float32Array, sampleRate: number): ArrayBuffer
 }
 
 interface Slot {
-  // M20 experiment: widened from HTMLAudioElement to HTMLMediaElement so the
-  // engine can hold either an <audio> or a <video> element. iOS Safari
-  // historically implemented captureStream() on HTMLVideoElement before
-  // HTMLAudioElement; <video> with display:none and audio-only sources
-  // plays identically to <audio> from the user's perspective. Every property
-  // we touch (src/play/pause/load/canPlayType/readyState/paused/ended/volume/
-  // muted/crossOrigin/preload) lives on HTMLMediaElement.
-  el: HTMLMediaElement | null;
+  el: HTMLAudioElement | null;
   mes: MediaElementAudioSourceNode | null;
   mix: GainNode | null;
   hls: any;
@@ -155,21 +149,6 @@ class AudioEngine {
   // capture. Lazily attached in ensureContext alongside the rest of the graph.
   private captureDest: MediaStreamAudioDestinationNode | null = null;
   private timeBuf: Uint8Array<ArrayBuffer> | null = null;
-
-  // M20 captureStream diagnostic. Parallel, inert tap on slot[0] via
-  // `el.captureStream() → createMediaStreamSource → analyser`. Lets us check
-  // whether captureStream actually carries decoded samples on iOS Safari
-  // (where the existing MediaElementAudioSourceNode path is silent). Wired
-  // lazily in ensureContext; not connected to destination, doesn't mute the
-  // element, doesn't change audible behavior on any platform. Read via
-  // `getCaptureStreamDiag()` / `sampleCaptureStreamDiag()`. Removed once
-  // M20 itself ships.
-  private diagCsStream: MediaStream | null = null;
-  private diagCsSrc: MediaStreamAudioSourceNode | null = null;
-  private diagCsAnalyser: AnalyserNode | null = null;
-  private diagCsBuf: Uint8Array<ArrayBuffer> | null = null;
-  private diagCsSupported = false;
-  private diagCsError: string | null = null;
 
   // Tone (M13). Stored in dB so they survive context (re)init, and applied
   // to the BiquadFilterNodes once `ensureContext` has built the graph.
@@ -579,9 +558,15 @@ class AudioEngine {
     const out = clamped * clamped; // curved — more natural to the ear
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(out, this.ctx.currentTime, 0.01);
-    } else {
-      // Fallback before context exists. Once the graph is up, masterGain
-      // takes over and element volume is reset to 1 (see ensureContext).
+    }
+    // Write to el.volume in two cases:
+    //   (a) iOS — masterGain is silent because of the iOS WebKit MES bug,
+    //       so el.volume is the only path that actually attenuates audible
+    //       audio on iPhone. The masterGain write above is a no-op there
+    //       but harmless.
+    //   (b) No context yet (very first user gesture) — fallback before the
+    //       audio graph is built.
+    if (isIos() || !this.masterGain || !this.ctx) {
       for (const slot of this.slots) {
         if (slot.el) slot.el.volume = out;
       }
@@ -883,99 +868,9 @@ class AudioEngine {
     return Math.min(1, rms * 2.2);
   }
 
-  // --- M20 captureStream diagnostic ---
-
-  /**
-   * Snapshot read of the parallel captureStream tap on slot[0]. Returns the
-   * current peak amplitude (0..1) over the analyser's ~21ms window. Used to
-   * verify whether captureStream actually carries decoded samples on iOS
-   * Safari (where the existing MediaElementAudioSourceNode path is silent).
-   *
-   * `peak` near zero AND audio audibly playing → captureStream has the same
-   * silent-tap problem as MES on this browser, M20 plan won't work.
-   * `peak` non-zero → captureStream carries signal, M20 is viable.
-   */
-  getCaptureStreamDiag(): {
-    supported: boolean;
-    error: string | null;
-    peak: number;
-    trackState: string;
-  } {
-    const trackState =
-      this.diagCsStream?.getAudioTracks()[0]?.readyState ?? "no-track";
-    if (!this.diagCsSupported) {
-      return { supported: false, error: this.diagCsError, peak: 0, trackState };
-    }
-    if (!this.diagCsAnalyser || !this.diagCsBuf) {
-      return {
-        supported: true,
-        error: "diagnostic analyser missing",
-        peak: 0,
-        trackState,
-      };
-    }
-    try {
-      this.diagCsAnalyser.getByteTimeDomainData(this.diagCsBuf);
-    } catch (e) {
-      return {
-        supported: true,
-        error: (e as Error).message,
-        peak: 0,
-        trackState,
-      };
-    }
-    let peak = 0;
-    for (let i = 0; i < this.diagCsBuf.length; i++) {
-      const v = Math.abs((this.diagCsBuf[i] - 128) / 128);
-      if (v > peak) peak = v;
-    }
-    return { supported: true, error: null, peak, trackState };
-  }
-
-  /**
-   * Sample the captureStream diagnostic at 100ms intervals over `durationMs`,
-   * return the maximum peak observed. Single snapshots can land in a quiet
-   * moment of music and read near-zero even when the stream is healthy;
-   * sampling over the full song-ID capture window gives us a robust answer.
-   */
-  async sampleCaptureStreamDiag(durationMs: number): Promise<{
-    supported: boolean;
-    error: string | null;
-    peak: number;
-    trackState: string;
-  }> {
-    // Retry the wire here — by the time the user taps NOW PLAYING, audio
-    // has been actively playing for a while, so browsers (e.g. Chrome) that
-    // only populate the captureStream's audio track after playback is live
-    // will now succeed.
-    this.tryWireCaptureStreamDiag();
-    const startTs = performance.now();
-    let peak = 0;
-    let lastSnap = this.getCaptureStreamDiag();
-    if (!lastSnap.supported) return lastSnap;
-    return new Promise((resolve) => {
-      const tick = () => {
-        const r = this.getCaptureStreamDiag();
-        if (r.peak > peak) peak = r.peak;
-        lastSnap = r;
-        if (performance.now() - startTs >= durationMs) {
-          resolve({
-            supported: true,
-            error: lastSnap.error,
-            peak,
-            trackState: lastSnap.trackState,
-          });
-        } else {
-          setTimeout(tick, 100);
-        }
-      };
-      tick();
-    });
-  }
-
   // --- internals ---
 
-  private wireEvents(el: HTMLMediaElement, idx: SlotIdx) {
+  private wireEvents(el: HTMLAudioElement, idx: SlotIdx) {
     el.addEventListener("waiting", () => {
       if (this.activeIdx === idx) this.setStatus("buffering");
     });
@@ -1291,27 +1186,11 @@ class AudioEngine {
       const idx = i as SlotIdx;
       const slot = this.slots[idx];
       if (!slot.el) {
-        // M20 experiment: <video> instead of <audio>. iOS Safari historically
-        // exposed captureStream on HTMLVideoElement before HTMLAudioElement;
-        // a hidden <video> plays audio-only sources identically to <audio>
-        // from the user's perspective. Hidden via inline styles so it never
-        // takes layout space or shows controls. playsinline is REQUIRED on
-        // iOS for video elements (otherwise iOS would auto-fullscreen on
-        // play, even with display:none — set defensively).
-        const el = document.createElement("video");
+        const el = document.createElement("audio");
         el.crossOrigin = "anonymous";
         el.preload = "none";
         (el as any).playsInline = true;
         el.setAttribute("playsinline", "");
-        // Belt-and-suspenders hide. display:none is the sledgehammer; the
-        // 0×0 + position-fixed + opacity:0 keeps it out of layout/paint
-        // even on browsers that treat display:none oddly with <video>.
-        el.style.display = "none";
-        el.style.position = "fixed";
-        el.style.width = "0";
-        el.style.height = "0";
-        el.style.opacity = "0";
-        el.style.pointerEvents = "none";
         this.wireEvents(el, idx);
         document.body.appendChild(el);
         slot.el = el;
@@ -1397,10 +1276,13 @@ class AudioEngine {
         this.staticSource.loop = true;
         this.staticSource.connect(this.staticGain);
         this.staticGain.connect(this.analyser);
-        // Now that masterGain owns volume, reset element-level volume to 1
-        // so the chain isn't compounding (out * out).
+        // On non-iOS, masterGain owns volume — reset element-level volume
+        // to 1 so the chain isn't compounding (out * out). On iOS, masterGain
+        // is silent (the WebKit MES bug), so el.volume IS the audible
+        // volume control — initialize it to the user's current setting.
+        const elVol = isIos() ? this.volume * this.volume : 1;
         for (const slot of this.slots) {
-          if (slot.el) slot.el.volume = 1;
+          if (slot.el) slot.el.volume = elVol;
         }
         this.snapshot = { ...this.snapshot, meterAvailable: true };
         this.emit();
@@ -1452,55 +1334,6 @@ class AudioEngine {
       }
     }
 
-    // M20 diagnostic — try to wire the parallel captureStream tap. Helper
-    // is also called from sampleCaptureStreamDiag right before sampling, so
-    // browsers that only populate the audio track after playback is live
-    // (e.g. desktop Chrome) get a fresh attempt at the moment we need it.
-    this.tryWireCaptureStreamDiag();
-  }
-
-  /**
-   * M20 diagnostic — attempt to wire a parallel captureStream tap on slot[0].
-   * Inert (not connected to destination, element not muted) — purely for
-   * reading peak amplitude to verify whether captureStream actually carries
-   * decoded samples on iOS Safari (where MES is silent). Idempotent: bails
-   * once `diagCsSupported` is true. Safe to call repeatedly.
-   */
-  private tryWireCaptureStreamDiag(): void {
-    if (!this.ctx || this.diagCsSupported) return;
-    try {
-      const el0 = this.slots[0].el;
-      const cap = el0 ? (el0 as any).captureStream : undefined;
-      if (typeof cap !== "function") {
-        // Tag the message with the actual element tag so we can tell apart
-        // "missing on <audio>" (the original M20 finding on iOS) from
-        // "missing on <video>" (this experiment's outcome on iOS, if so).
-        const tag = el0?.tagName?.toLowerCase() ?? "media";
-        this.diagCsError = `captureStream not available on <${tag}>`;
-        return;
-      }
-      const stream: MediaStream = cap.call(el0);
-      if (!stream || stream.getAudioTracks().length === 0) {
-        // Stream exists but no audio track yet — Chrome only populates the
-        // track after playback is actively decoding. Leave diagCsSupported
-        // false so the next call (e.g. from sampleCaptureStreamDiag at tap
-        // time) re-attempts when audio is rolling.
-        this.diagCsError = "captureStream returned no audio track yet";
-        return;
-      }
-      const src = this.ctx.createMediaStreamSource(stream);
-      const a = this.ctx.createAnalyser();
-      a.fftSize = 1024;
-      src.connect(a);
-      this.diagCsStream = stream;
-      this.diagCsSrc = src;
-      this.diagCsAnalyser = a;
-      this.diagCsBuf = new Uint8Array(new ArrayBuffer(a.fftSize));
-      this.diagCsSupported = true;
-      this.diagCsError = null;
-    } catch (e) {
-      this.diagCsError = `captureStream wire failed: ${(e as Error).message}`;
-    }
   }
 
   // --- M19 tuning-static internals ---
