@@ -43,6 +43,13 @@
 // Reconnect fallback (M10): if pre-warm wasn't ready (HLS, transient
 // pre-warm failure, etc.) we fall back to retry-with-backoff on the active
 // slot. SIGNAL LOST surfaces only after MAX_RECONNECTS consecutive failures.
+//
+// Capture tap (M18): a MediaStreamAudioDestinationNode (`captureDest`) is
+// connected in parallel to the analyser output, giving us a fan-out of the
+// source signal (post-mix, pre-EQ/volume/doze). `captureAudioClip()` records
+// from this stream via MediaRecorder for short song-ID fingerprint clips.
+// Tapping pre-volume means a muted user can still ID the current song;
+// tapping pre-doze means an in-progress fade-out doesn't silence the clip.
 
 import type { StreamType } from "@/data/seed";
 
@@ -81,6 +88,9 @@ class AudioEngine {
   private trebleFilter: BiquadFilterNode | null = null;
   private masterGain: GainNode | null = null;
   private dozeGain: GainNode | null = null;
+  // M18: parallel tap off the analyser output for song-ID fingerprint
+  // capture. Lazily attached in ensureContext alongside the rest of the graph.
+  private captureDest: MediaStreamAudioDestinationNode | null = null;
   private timeBuf: Uint8Array<ArrayBuffer> | null = null;
 
   // Tone (M13). Stored in dB so they survive context (re)init, and applied
@@ -431,6 +441,95 @@ class AudioEngine {
   getDozeRemainingMs(): number {
     if (!this.dozeEndAt) return 0;
     return Math.max(0, this.dozeEndAt - performance.now());
+  }
+
+  // --- Song-ID capture (M18) ---
+
+  /**
+   * Record `seconds` of the current audio output into a Blob suitable for
+   * upload to AudD or any other fingerprinting service. Returns the captured
+   * blob (typically webm/opus, mp4 on Safari).
+   *
+   * Throws if the audio context isn't initialized yet (no playback has ever
+   * started), if MediaRecorder isn't supported (legacy Safari), or if no
+   * supported audio mime type is available. Callers should surface a
+   * friendly message in those cases.
+   *
+   * Captures ~8s by default — AudD's recommended minimum for reliable
+   * fingerprint matching. Longer is fine; AudD's upload cap is 25MB and an
+   * opus-encoded radio stream runs ~6-8 KB/s, so even a 60s capture is well
+   * under the limit.
+   */
+  async captureAudioClip(seconds: number = 8): Promise<Blob> {
+    // If the graph isn't built yet (no playback has ever started), try
+    // ensureContext() once — it's a no-op when slots haven't been wired.
+    if (!this.captureDest) {
+      await this.ensureContext();
+    }
+    if (!this.captureDest) {
+      throw new Error("captureDest unavailable (no audio context yet?)");
+    }
+    if (typeof MediaRecorder === "undefined") {
+      throw new Error("MediaRecorder not supported in this browser");
+    }
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+    ];
+    const mimeType = candidates.find((t) =>
+      (MediaRecorder as any).isTypeSupported?.(t),
+    );
+    if (!mimeType) {
+      throw new Error("no supported MediaRecorder mime type");
+    }
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(this.captureDest.stream, { mimeType });
+    } catch (e) {
+      throw new Error(
+        `MediaRecorder ctor failed (${mimeType}): ${(e as Error).message}`,
+      );
+    }
+    const chunks: BlobPart[] = [];
+
+    return new Promise<Blob>((resolve, reject) => {
+      recorder.addEventListener("dataavailable", (e: BlobEvent) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      });
+      recorder.addEventListener("stop", () => {
+        const blob = new Blob(chunks, { type: mimeType });
+        if (blob.size === 0) {
+          reject(new Error("captured 0-byte clip (audio not flowing?)"));
+          return;
+        }
+        resolve(blob);
+      });
+      recorder.addEventListener("error", (e: Event) => {
+        const err = (e as unknown as { error?: { name?: string; message?: string } }).error;
+        reject(
+          new Error(
+            `MediaRecorder error: ${err?.name ?? "unknown"} ${err?.message ?? ""}`,
+          ),
+        );
+      });
+      try {
+        recorder.start();
+        setTimeout(() => {
+          if (recorder.state !== "inactive") {
+            try {
+              recorder.stop();
+            } catch {
+              /* noop */
+            }
+          }
+        }, Math.max(1000, seconds * 1000));
+      } catch (e) {
+        reject(new Error(`MediaRecorder start() failed: ${(e as Error).message}`));
+      }
+    });
   }
 
   // RMS of current analyser window, 0..1. The analyser sits downstream of
@@ -789,6 +888,14 @@ class AudioEngine {
         this.trebleFilter.connect(this.masterGain);
         this.masterGain.connect(this.dozeGain);
         this.dozeGain.connect(this.ctx.destination);
+
+        // M18 capture tap. Parallel branch off the analyser — same point in
+        // the graph where the bass filter pulls — so the captured stream has
+        // the source signal at full level regardless of user volume / doze
+        // fade. `captureDest.stream` is a MediaStream that MediaRecorder can
+        // consume on demand from `captureAudioClip()`.
+        this.captureDest = this.ctx.createMediaStreamDestination();
+        this.analyser.connect(this.captureDest);
         // Now that masterGain owns volume, reset element-level volume to 1
         // so the chain isn't compounding (out * out).
         for (const slot of this.slots) {
@@ -807,6 +914,20 @@ class AudioEngine {
       try {
         await this.ctx.resume();
       } catch {}
+    }
+
+    // M18 — defensively (re-)create the capture destination if it's missing.
+    // Handles the case where ensureContext ran in a prior session before M18
+    // shipped, leaving us with an AudioContext that has no captureDest node.
+    // Idempotent: we only build it once per context lifetime.
+    if (this.ctx && this.analyser && !this.captureDest) {
+      try {
+        this.captureDest = this.ctx.createMediaStreamDestination();
+        this.analyser.connect(this.captureDest);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[audio] captureDest setup failed:", (e as Error).message);
+      }
     }
   }
 

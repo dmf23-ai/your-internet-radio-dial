@@ -225,3 +225,41 @@ create policy "suggestions_insert_any" on public.suggestions
   for insert with check (
     user_id is null or auth.uid() = user_id
   );
+
+-- ============================================================================
+-- Song ID cache (M18)
+--
+-- Shared community cache for AudD song-identification results, keyed by
+-- station_id. The /api/song-id route checks this table before calling AudD;
+-- a hit younger than ~60s is returned immediately so multiple users tuned
+-- to the same station within the TTL window only cost one AudD call.
+--
+-- Not user-scoped — this is a public lookup, intentionally readable and
+-- writable by anyone with the anon key. Worst-case abuse is a polluted
+-- artist/title string for a station, which the next legitimate ID call
+-- overwrites within seconds. If abuse becomes a real problem, tighten by
+-- moving writes behind a service-role API route.
+-- ============================================================================
+
+create table if not exists public.song_id_cache (
+  station_id    text        primary key,
+  artist        text,
+  title         text,
+  identified_at timestamptz not null default now()
+);
+
+create index if not exists song_id_cache_identified_at_idx
+  on public.song_id_cache (identified_at desc);
+
+alter table public.song_id_cache enable row level security;
+
+drop policy if exists "song_id_cache_select_any" on public.song_id_cache;
+drop policy if exists "song_id_cache_insert_any" on public.song_id_cache;
+drop policy if exists "song_id_cache_update_any" on public.song_id_cache;
+
+create policy "song_id_cache_select_any" on public.song_id_cache
+  for select using (true);
+create policy "song_id_cache_insert_any" on public.song_id_cache
+  for insert with check (true);
+create policy "song_id_cache_update_any" on public.song_id_cache
+  for update using (true) with check (true);

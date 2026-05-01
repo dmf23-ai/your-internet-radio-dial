@@ -15,6 +15,7 @@ import StationDetailCard from "./StationDetailCard";
 import TonePanel from "./TonePanel";
 import DozePlaque from "./DozePlaque";
 import ScanButton from "./ScanButton";
+import NowPlayingLozenge from "./NowPlayingLozenge";
 import { PowerButton, OnAirLamp } from "./Lamps";
 import { useRadioStore } from "@/lib/store";
 
@@ -198,14 +199,23 @@ export default function Console() {
             <VolumeKnob />
           </div>
 
-          {/* Center: dial window + ON AIR lamp. The lamp sits in a flex-1
-              spacer below the dial; in the desktop layout the row stretches
-              to match the taller volume column on the left, so the lamp
-              vertically centers in the empty space between the dial face
-              and the band ribbon below. */}
+          {/* Center: dial window + NOW PLAYING lozenge + ON AIR lamp. The
+              NOW PLAYING lozenge (M18) is centered directly below the dial
+              face — tap to identify the current song via AudD. The ON AIR
+              lamp sits below it in a flex-1 spacer; in the desktop layout
+              the row stretches to match the taller volume column on the
+              left, so the lamp vertically centers in the empty space
+              between the lozenge and the band ribbon below. */}
           <div className="md:col-span-6 order-1 md:order-2 flex flex-col">
             <DialWindow />
-            <div className="flex-1 flex items-center justify-center mt-3">
+            <div className="mt-4 sm:mt-5">
+              <NowPlayingLozenge />
+            </div>
+            {/* ON AIR drops to the bottom of the available space (items-end)
+                instead of vertically centering — gives the larger NOW PLAYING
+                plate above it room to breathe. mt-6 keeps a minimum gap on
+                tighter viewports where the column is short. */}
+            <div className="flex-1 flex items-end justify-center mt-6 sm:mt-8 pb-1 sm:pb-2">
               <OnAirLamp />
             </div>
           </div>
