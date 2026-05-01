@@ -709,7 +709,13 @@ class AudioEngine {
    * started). Captures ~8s by default — AudD's recommended minimum for
    * reliable fingerprint matching.
    */
-  async captureAudioClip(seconds: number = 8): Promise<Blob> {
+  async captureAudioClip(seconds: number = 8): Promise<{
+    blob: Blob;
+    peakAmplitude: number;
+    durationMs: number;
+    sampleRate: number;
+    fireCount: number;
+  }> {
     // If the graph isn't built yet (no playback has ever started), try
     // ensureContext() once — it's a no-op when slots haven't been wired.
     if (!this.ctx || !this.analyser) {
@@ -724,25 +730,31 @@ class AudioEngine {
     const targetSamples = Math.max(1, Math.floor(seconds * sr));
 
     // ScriptProcessor is deprecated in favor of AudioWorklet but remains
-    // reliable across every current browser including iOS. Buffer size
-    // 4096 is the sweet spot — small enough to keep latency tight, large
-    // enough not to thrash the main thread. Stereo input so we keep both
-    // channels for the mono mixdown below; mono output is unused (we route
-    // through a 0-gain sink — ScriptProcessor only fires onaudioprocess
-    // when its output is connected to ctx.destination, but we don't want
-    // its output to actually become audible).
-    const proc = ctx.createScriptProcessor(4096, 2, 1);
-    const silentSink = ctx.createGain();
-    silentSink.gain.value = 0;
+    // reliable across every current browser including iOS. Connect proc
+    // directly to ctx.destination (instead of via a 0-gain sink) and
+    // explicitly zero the output buffers — ScriptProcessor's spec
+    // requires a path to destination for onaudioprocess to fire, and a
+    // 0-gain sink can be optimized away by aggressive WebKit graph
+    // pruning. Direct connection + zero-fill is the canonical "tap"
+    // pattern that works on iOS without bleeding any audio into the
+    // main output. (2,2) symmetric I/O for compatibility — mono mixdown
+    // happens in JS below.
+    const proc = ctx.createScriptProcessor(4096, 2, 2);
     analyser.connect(proc);
-    proc.connect(silentSink);
-    silentSink.connect(ctx.destination);
+    proc.connect(ctx.destination);
 
     const accum: Float32Array[] = [];
     let totalSamples = 0;
+    let fireCount = 0;
     const wallClockMs = Math.max(1000, seconds * 1000) + 1000; // +1s slack
 
-    return new Promise<Blob>((resolve, reject) => {
+    return new Promise<{
+      blob: Blob;
+      peakAmplitude: number;
+      durationMs: number;
+      sampleRate: number;
+      fireCount: number;
+    }>((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
         try {
@@ -757,11 +769,6 @@ class AudioEngine {
         }
         try {
           proc.disconnect();
-        } catch {
-          /* noop */
-        }
-        try {
-          silentSink.disconnect();
         } catch {
           /* noop */
         }
@@ -783,11 +790,29 @@ class AudioEngine {
           all.set(buf.subarray(0, take), off);
           off += take;
         }
+        // Peak amplitude over the captured window. Near-zero (< 0.005)
+        // means the analyser tap isn't carrying signal even though the
+        // user can hear audio — usually an iOS Safari taint of the
+        // MediaElementAudioSourceNode. Surfaced in the lozenge error
+        // path so failures are diagnosable from the cream window.
+        let peak = 0;
+        for (let i = 0; i < all.length; i++) {
+          const a = Math.abs(all[i]);
+          if (a > peak) peak = a;
+        }
+        const durationMs = Math.round((all.length / sr) * 1000);
         const wav = encodeWavMono16(all, sr);
-        resolve(new Blob([wav], { type: "audio/wav" }));
+        resolve({
+          blob: new Blob([wav], { type: "audio/wav" }),
+          peakAmplitude: peak,
+          durationMs,
+          sampleRate: sr,
+          fireCount,
+        });
       };
 
       proc.onaudioprocess = (e: AudioProcessingEvent) => {
+        fireCount++;
         const inBuf = e.inputBuffer;
         const len = inBuf.length;
         const numCh = inBuf.numberOfChannels;
@@ -801,6 +826,12 @@ class AudioEngine {
         }
         accum.push(mono);
         totalSamples += len;
+        // Explicitly zero the outputs so this tap doesn't introduce any
+        // audible signal at ctx.destination (we read from input only).
+        const outBuf = e.outputBuffer;
+        for (let ch = 0; ch < outBuf.numberOfChannels; ch++) {
+          outBuf.getChannelData(ch).fill(0);
+        }
         if (totalSamples >= targetSamples) finalize();
       };
 

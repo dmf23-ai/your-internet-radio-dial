@@ -204,7 +204,12 @@ export default function NowPlayingLozenge() {
     setState({ kind: "listening" });
 
     try {
-      const blob = await getAudioEngine().captureAudioClip(CAPTURE_SECONDS);
+      const cap = await getAudioEngine().captureAudioClip(CAPTURE_SECONDS);
+      const { blob, peakAmplitude, durationMs, fireCount } = cap;
+      const sizeKb = (blob.size / 1024).toFixed(0);
+      const stats = `${sizeKb}KB ${durationMs}ms pk=${peakAmplitude.toFixed(2)} n=${fireCount}`;
+      // eslint-disable-next-line no-console
+      console.log("[song-id] capture:", stats);
 
       const form = new FormData();
       form.append("stationId", stationId);
@@ -221,6 +226,11 @@ export default function NowPlayingLozenge() {
         } catch {
           // Body wasn't JSON; keep the generic status-code message.
         }
+        // Prepend capture stats so iOS-only failures are diagnosable
+        // directly from the cream window: peak≈0 ⇒ silent capture
+        // (analyser tap broken), tiny size ⇒ capture cut short, normal
+        // size+peak ⇒ AudD is rejecting valid WAV.
+        detail = `${stats} · ${detail}`;
         // eslint-disable-next-line no-console
         console.error("[song-id] HTTP", res.status, detail);
         setState({ kind: "error", message: detail });
