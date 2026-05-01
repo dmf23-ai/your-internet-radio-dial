@@ -431,7 +431,24 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   // Changes current station. If Power is on, auto-plays the new stream.
   // The optional autoplay param can force play regardless of Power state.
   // Manual tune cancels any active scan — the user is taking the wheel.
+  //
+  // M19: clicking the already-active station while it's playing is a no-op —
+  // we don't want to drag the user through 2.25s of tuning static for nothing.
+  // The exception is during a tune sequence (status === 'tuning'), where the
+  // user is mid-drag and we DO need to fall through so the lock-in can fire.
   setCurrentStation: (id, autoplay = false) => {
+    const sameId = id === get().currentStationId;
+    const status = get().playback.status;
+    if (
+      sameId &&
+      !autoplay &&
+      get().isOn &&
+      status !== "tuning" &&
+      status !== "idle" &&
+      status !== "error"
+    ) {
+      return;
+    }
     if (get().scanning) {
       // Module-level interval handles the actual stop; we just flip the flag.
       stopScanInterval();
@@ -459,6 +476,10 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   },
 
   // Power on + start stream. isOn persists through transient stream errors.
+  // M19: routes through engine.tune() so every user-initiated tune (power-on,
+  // dial click, band button, drawer click, search-add, scan tick, drag-release)
+  // gets the FM-shhhh tuning-static envelope. M10 reconnect and M11 pre-warm
+  // swap call engine.play() directly and stay silent.
   play: async () => {
     const s = get().currentStation();
     if (!s) return;
@@ -466,7 +487,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     const engine = getAudioEngine();
     engine.setVolume(get().volume);
     // corsOk defaults to true when unset (assume CORS-clean unless flagged).
-    await engine.play(s.streamUrl, s.streamType, s.corsOk ?? true);
+    await engine.tune(s.streamUrl, s.streamType, s.corsOk ?? true);
   },
 
   // Power off. Scan and doze are automatic features that don't make sense

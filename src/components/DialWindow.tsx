@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useRadioStore } from "@/lib/store";
+import { getAudioEngine } from "@/lib/audio";
 
 /**
  * Fetch "now playing" title for a stream URL via our proxy.
@@ -252,6 +253,9 @@ export default function DialWindow() {
   const currentStationId = useRadioStore((s) => s.currentStationId);
   const setCurrentStation = useRadioStore((s) => s.setCurrentStation);
   const setDetailOpen = useRadioStore((s) => s.setDetailOpen);
+  // M19: caption flips to "Tuning…" while the engine is mid-tune-static so
+  // the user sees the metaphor land in writing as well as in audio.
+  const status = useRadioStore((s) => s.playback.status);
   const nowPlaying = useNowPlaying(current?.streamUrl);
 
   const count = list.length;
@@ -318,6 +322,11 @@ export default function DialWindow() {
     const dx = e.clientX - drag.start;
     const next = clampTranslate(drag.base + dx);
     const moved = drag.moved || Math.abs(dx) > DRAG_THRESHOLD;
+    // M19: just crossed click→drag threshold — fade audio out and start
+    // playing tuning static. Static stays up until release (endDrag).
+    if (moved && !drag.moved) {
+      void getAudioEngine().beginDragTuning();
+    }
     setDrag({ ...drag, current: next, moved });
   };
 
@@ -334,6 +343,12 @@ export default function DialWindow() {
       const target = list[snapIdx];
       if (target && target.id !== currentStationId) {
         setCurrentStation(target.id);
+      } else {
+        // M19: drag landed back on the active station. setCurrentStation
+        // would be a no-op here (and won't trigger any engine call), so
+        // close out the static envelope explicitly — crossfade back to the
+        // already-playing audio.
+        getAudioEngine().endDragTuning();
       }
       // Swallow the click event that follows pointerup so the label the
       // user happened to release over doesn't also fire its own tune.
@@ -361,7 +376,10 @@ export default function DialWindow() {
   }
   const metaLine =
     bits.length > 0 ? bits.join(" · ") : "— turn the dial to begin —";
-  const caption = nowPlaying ? `${metaLine} — ${nowPlaying}` : metaLine;
+  const stationCaption = nowPlaying ? `${metaLine} — ${nowPlaying}` : metaLine;
+  // M19: while the engine is between stations, the caption sells the
+  // metaphor. The new station's name doesn't appear until lock-in.
+  const caption = status === "tuning" ? "Tuning…" : stationCaption;
 
   return (
     <div className="relative">
@@ -546,7 +564,11 @@ export default function DialWindow() {
           <div className="absolute left-0 right-0 bottom-2 flex justify-center px-4">
             <ScrollingCaption
               text={caption}
-              onClick={current ? () => setDetailOpen(true) : undefined}
+              onClick={
+                current && status !== "tuning"
+                  ? () => setDetailOpen(true)
+                  : undefined
+              }
             />
           </div>
         </div>

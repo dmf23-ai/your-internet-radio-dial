@@ -86,12 +86,17 @@ export function PowerButton() {
 /**
  * OnAirLamp — passive status indicator at bottom-right.
  * idle = dark, buffering = pulsing amber, playing = steady amber, error = red.
+ *
+ * M19: 'tuning' status (between-stations static envelope) renders the lamp
+ * the same as 'playing' — steady amber, no pulse — so the color stays stable
+ * across the user's tune action. The label flips to "Tuning…" so the user
+ * has a textual cue to match the dial caption.
  */
 export function OnAirLamp() {
   const status = useRadioStore((s) => s.playback.status);
 
   const color =
-    status === "playing"
+    status === "playing" || status === "tuning"
       ? "#ffb347"
       : status === "buffering"
       ? "#ff9d30"
@@ -100,7 +105,7 @@ export function OnAirLamp() {
       : "#5a3f1a";
 
   const glow =
-    status === "playing"
+    status === "playing" || status === "tuning"
       ? "0 0 8px rgba(255,179,71,0.9), 0 0 2px rgba(255,179,71,1)"
       : status === "buffering"
       ? "0 0 10px rgba(255,157,48,0.95), 0 0 2px rgba(255,157,48,1)"
@@ -113,7 +118,7 @@ export function OnAirLamp() {
   const label =
     status === "error"
       ? "Signal Lost"
-      : status === "buffering"
+      : status === "buffering" || status === "tuning"
       ? "Tuning…"
       : "On Air";
 

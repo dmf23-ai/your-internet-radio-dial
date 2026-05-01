@@ -50,10 +50,25 @@
 // from this stream via MediaRecorder for short song-ID fingerprint clips.
 // Tapping pre-volume means a muted user can still ID the current song;
 // tapping pre-doze means an in-progress fade-out doesn't silence the clip.
+//
+// Tuning static (M19): a procedurally-generated pink-noise+crackle buffer
+// loops through `staticGain` (default 0) into the analyser input. On a
+// user-initiated tune, the active slot's mix gain ramps to 0 while staticGain
+// ramps up — the user hears FM-shhhh between stations. After a minimum
+// plateau, the new station's `playing` event triggers a crossfade back:
+// staticGain → 0 + new-slot.mix → 1. Drag-tunes (DialWindow drum) hold static
+// continuously between pointerdown-past-threshold and release, then lock in
+// on release. Static routes through the same EQ/master/doze chain as audio,
+// so it obeys the user's volume + tone + Doze fade and drives the VU meter.
 
 import type { StreamType } from "@/data/seed";
 
-export type AudioStatus = "idle" | "buffering" | "playing" | "error";
+export type AudioStatus =
+  | "idle"
+  | "buffering"
+  | "tuning"
+  | "playing"
+  | "error";
 
 export interface AudioSnapshot {
   status: AudioStatus;
@@ -137,6 +152,39 @@ class AudioEngine {
   private static readonly PREWARM_DELAY_MS = 270_000;
   private static readonly SWAP_RAMP_S = 0.05;
 
+  // M19 tuning-static state. The static node graph (buffer source + gain) is
+  // built lazily inside ensureContext() and lives for the engine's lifetime.
+  // `tuneToken` increments on every tune entry so superseded scheduled
+  // callbacks (load delay, lock-in) can no-op. `tuneMinLockAt` is the
+  // earliest performance.now() ms at which the lock-in crossfade may start;
+  // 0 means "lock in as soon as the new station starts playing" (used by
+  // the drag-release path so snap-tune feels snappy).
+  private staticBuffer: AudioBuffer | null = null;
+  private staticSource: AudioBufferSourceNode | null = null;
+  private staticGain: GainNode | null = null;
+  // AudioBufferSourceNode.start() can only be called once per node; this
+  // gates the lazy start that runs after ctx.resume() (the source must not
+  // be started while the context is still suspended on first power-on,
+  // or it can fail to actually produce audio when ctx eventually resumes).
+  private staticSourceStarted = false;
+  private tuneToken = 0;
+  private inTuneSequence = false;
+  private tuneMinLockAt = 0;
+  // When true (manual tunes, drag-release), an overrun fires the brief
+  // 50ms lock-in snap so total time ≈ load time. When false (reconnect),
+  // overruns still use the full 300ms crossfade so a stream-drop bridge
+  // gets matched fade-in / fade-out static.
+  private tuneAllowOverrunSnap = true;
+  private static readonly TUNE_GAIN_TARGET = 0.33;
+  private static readonly TUNE_FADE_S = 0.15;
+  private static readonly TUNE_LOCK_RAMP_S = 0.3;
+  // Brief lock-in used when the new station took longer than the plateau to
+  // start playing — snaps static out without adding 300ms to the natural
+  // tune time.
+  private static readonly TUNE_LOCK_RAMP_OVERRUN_S = 0.05;
+  private static readonly TUNE_PLATEAU_MS = 550; // 0.15 fade + 0.4 plateau + 0.3 lock = 0.85s
+  private static readonly TUNE_LOAD_DELAY_MS = 200;
+
   // --- public API ---
 
   subscribe(fn: Listener): () => void {
@@ -197,10 +245,21 @@ class AudioEngine {
 
     // Same URL → just resume on the active slot.
     if (url === this.currentUrl && activeSlot.el.src) {
+      // Capture pre-await state — after the await, paused will be false in
+      // both "was playing" and "was paused, .play() succeeded" cases.
+      const wasAlreadyPlaying = !activeSlot.el.paused;
       try {
         await this.ensureContext();
         await activeSlot.el.play();
-        this.setStatus("playing");
+        if (this.inTuneSequence && wasAlreadyPlaying) {
+          // No `playing` transition will fire (the element was already
+          // playing) → manually lock in or we'd stall in 'tuning' forever.
+          this.lockInTune();
+        } else if (!this.inTuneSequence) {
+          this.setStatus("playing");
+        }
+        // else (inTuneSequence && was paused): `playing` event will fire and
+        // its handler schedules the lock-in with the plateau gate intact.
       } catch (e: any) {
         this.intentPlaying = false;
         this.setStatus("error", e?.message ?? "play failed");
@@ -219,7 +278,10 @@ class AudioEngine {
     activeSlot.el.load();
 
     this.currentUrl = url;
-    this.setStatus("buffering");
+    // During a tune sequence, status stays 'tuning' until lock-in. Without
+    // this guard, the buffering setStatus would flip the caption out of
+    // "Tuning…" mid-sequence.
+    if (!this.inTuneSequence) this.setStatus("buffering");
 
     try {
       if (isHls && !activeSlot.el.canPlayType("application/vnd.apple.mpegurl")) {
@@ -244,10 +306,15 @@ class AudioEngine {
       // Make sure the active slot is the one that's audible.
       if (this.ctx && activeSlot.mix && otherSlot.mix) {
         const t = this.ctx.currentTime;
-        activeSlot.mix.gain.cancelScheduledValues(t);
         otherSlot.mix.gain.cancelScheduledValues(t);
-        activeSlot.mix.gain.setValueAtTime(1, t);
         otherSlot.mix.gain.setValueAtTime(0, t);
+        // During a tune sequence, the active mix is held at 0 by fadeToStatic
+        // and gets ramped back up by lockInTune. Don't snap it to 1 here —
+        // that would defeat the static envelope.
+        if (!this.inTuneSequence) {
+          activeSlot.mix.gain.cancelScheduledValues(t);
+          activeSlot.mix.gain.setValueAtTime(1, t);
+        }
       }
 
       const meterAvailable = !!this.analyser;
@@ -255,7 +322,11 @@ class AudioEngine {
       this.emit();
 
       await activeSlot.el.play();
-      this.setStatus("playing");
+      // During a tune sequence, status stays 'tuning' until lock-in. The
+      // 'playing' event handler will schedule lock-in once audio is flowing.
+      if (!this.inTuneSequence) {
+        this.setStatus("playing");
+      }
       // Pre-warm gets scheduled inside the `playing` event handler once we
       // know audio is actually flowing.
     } catch (e: any) {
@@ -266,6 +337,138 @@ class AudioEngine {
     }
   }
 
+  /**
+   * M19 — user-initiated tune entry point. Plays the FM-shhhh tuning-static
+   * envelope around a station change:
+   *
+   *   t=0     — fade old slot.mix → 0 + ramp staticGain → TARGET over 150ms,
+   *             status="tuning"
+   *   t=200ms — load new station on the active slot (via play())
+   *   t≥550   — once new slot fires `playing` AND minimum plateau elapsed,
+   *             crossfade staticGain → 0 + new slot.mix → 1 over 300ms,
+   *             status="playing"
+   *
+   * Total floor: ~0.85s. Stretches gracefully if the new stream takes longer
+   * than the plateau to start playing — static holds at full until lock-in.
+   *
+   * Called via `store.play()` so EVERY user-initiated tune (dial click, band
+   * button, drawer click, search-add, scan tick, power-on) gets the envelope.
+   * M10 reconnect and M11 pre-warm swap call `play()` directly and stay silent.
+   *
+   * If a drag is in progress (beginDragTuning was called), static is already
+   * up — this just loads the new URL and lets the lock-in fire on `playing`.
+   */
+  async tune(
+    url: string,
+    type: StreamType,
+    corsOk: boolean = true,
+  ): Promise<void> {
+    // First — make sure the slot <audio> elements exist. ensureContext
+    // bails early when they don't, and on the very first power-on tune()
+    // would silently fall through to play() and skip the static envelope
+    // entirely. Mirrors what play() does at its top.
+    this.ensureDom();
+    await this.ensureContext();
+    // No graph yet → fall through to plain play. Happens on the very first
+    // user gesture if a tune happens to fire before AudioContext unlock.
+    if (!this.ctx || !this.staticGain) {
+      return this.play(url, type, corsOk);
+    }
+
+    const sameUrl = this.currentUrl === url;
+    const active = this.slots[this.activeIdx];
+    const isPlaying = !!active.el && !active.el.paused;
+
+    // Mid-drag, released on the same station → just lock in. No reload.
+    if (this.inTuneSequence && sameUrl && isPlaying) {
+      this.lockInTune();
+      return;
+    }
+
+    // Not mid-tune, already playing this URL → no-op. Avoids a 2.25s static
+    // detour for clicking the already-active station.
+    if (
+      !this.inTuneSequence &&
+      sameUrl &&
+      isPlaying &&
+      this.snapshot.status === "playing"
+    ) {
+      return;
+    }
+
+    // Bump token on every entry that supersedes prior tune state — keeps
+    // any stale scheduled callbacks (load delay, lock-in) from firing.
+    const token = ++this.tuneToken;
+    // User-initiated tune → opt back into the overrun-snap behavior in
+    // case we're inheriting the no-snap state from a prior reconnect.
+    this.tuneAllowOverrunSnap = true;
+
+    // Mid-tune (drag in progress, or reconnect static is up), different URL
+    // (or paused same URL) → static already audible; just load and let
+    // lock-in fire on the new slot's `playing` event.
+    if (this.inTuneSequence) {
+      return this.play(url, type, corsOk);
+    }
+
+    // Fresh tune. Fade old + raise static, then load after a short delay so
+    // the static fade-in is audible before the new connection's buffering.
+    this.inTuneSequence = true;
+    this.tuneMinLockAt = performance.now() + AudioEngine.TUNE_PLATEAU_MS;
+    this.intentPlaying = true;
+    this.setStatus("tuning");
+    this.fadeToStatic(AudioEngine.TUNE_FADE_S);
+
+    setTimeout(() => {
+      if (this.tuneToken !== token) return; // superseded
+      void this.play(url, type, corsOk);
+    }, AudioEngine.TUNE_LOAD_DELAY_MS);
+  }
+
+  /**
+   * M19 — begin a drag-tune. Called by DialWindow when the dial-drum drag
+   * crosses the click/drag threshold. Fades old audio → 0 and raises static
+   * to TARGET; static stays up continuously until release. The release path
+   * goes through `tune(url,...)` (via store.setCurrentStation → store.play),
+   * which sees `inTuneSequence=true` and just loads the new URL — lock-in
+   * fires on the new slot's `playing` event with no plateau gate.
+   *
+   * No-op if no AudioContext yet (no playback has ever started) or if
+   * already in a tune sequence.
+   */
+  async beginDragTuning(): Promise<void> {
+    // Power-off guard: a drag gesture on the dial-drum's cream window is a UI
+    // event, not user intent to play. When the radio is off (intentPlaying
+    // false) we don't want to raise static — and unlike a tune, there's no
+    // store.play follow-through to eventually trigger lockInTune, so static
+    // would persist until the user powers on. Just no-op.
+    if (!this.intentPlaying) return;
+    // Mirror tune() — ensureContext bails early without slot elements, and
+    // beginDragTuning before any tune ever happened would otherwise no-op.
+    this.ensureDom();
+    await this.ensureContext();
+    if (!this.ctx || !this.staticGain) return;
+    if (this.inTuneSequence) return;
+    this.tuneToken++;
+    this.inTuneSequence = true;
+    this.tuneMinLockAt = 0; // no plateau — lock in as soon as new slot plays
+    this.tuneAllowOverrunSnap = true;
+    this.setStatus("tuning");
+    this.fadeToStatic(AudioEngine.TUNE_FADE_S);
+  }
+
+  /**
+   * M19 — close out a drag-tune that resolved on the *same* station the user
+   * started on. There's no reload to do, so `tune()` won't be called via the
+   * store — but static is still up. Crossfade it back to the live audio.
+   *
+   * The store-side path for "drag landed on a different station" runs
+   * `setCurrentStation → play → tune`, and `tune()` handles its own lock-in.
+   */
+  endDragTuning(): void {
+    if (!this.inTuneSequence) return;
+    this.lockInTune();
+  }
+
   pause(): void {
     // User intent: stop listening. Cancel reconnect and pre-warm so their
     // event handlers don't misread the resulting pauses as unexpected drops.
@@ -273,6 +476,8 @@ class AudioEngine {
     this.clearReconnectTimer();
     this.clearPrewarmTimer();
     this.prewarmActive = false;
+    // Bail out of any active tune sequence so static doesn't leak into idle.
+    this.killStatic();
     // Pause both slots — pre-warm may be silently buffering on the inactive
     // one and we don't want it churning a connection in the background.
     for (const slot of this.slots) {
@@ -290,6 +495,7 @@ class AudioEngine {
     this.clearReconnectTimer();
     this.clearPrewarmTimer();
     this.prewarmActive = false;
+    this.killStatic();
     this.teardownHls();
     for (const slot of this.slots) {
       if (!slot.el) continue;
@@ -566,9 +772,40 @@ class AudioEngine {
         // pending reconnect timer.
         this.reconnectAttempts = 0;
         this.clearReconnectTimer();
-        this.setStatus("playing");
-        // Arm the pre-warm for ~30s before the expected Vercel cut.
-        this.schedulePrewarm();
+
+        // M19: if a tune sequence is in flight, defer the status flip and
+        // pre-warm scheduling until lock-in. Lock-in waits for the minimum
+        // plateau (if any) so brief tunes still feel like tuning, not just
+        // skipping. Token check guards re-entry: if a newer tune has started
+        // since we entered this handler, our scheduled lock-in no-ops.
+        //
+        // Overrun: if the new station took longer than the plateau to start
+        // playing, the static has already been audible for the full plateau
+        // duration AND the load-wait. Use a brief snap (50ms) instead of
+        // the full 300ms crossfade so total static time ≈ natural load time
+        // instead of always adding 300ms on top.
+        if (this.inTuneSequence) {
+          const token = this.tuneToken;
+          const now = performance.now();
+          const overrun = now > this.tuneMinLockAt;
+          const delay = overrun ? 0 : this.tuneMinLockAt - now;
+          // Overrun snap (50ms) only when explicitly opted in (manual tunes,
+          // drag-release). Reconnect leaves the flag false so it always uses
+          // the full 300ms crossfade — matches the audible fade-in.
+          const ramp =
+            overrun && this.tuneAllowOverrunSnap
+              ? AudioEngine.TUNE_LOCK_RAMP_OVERRUN_S
+              : AudioEngine.TUNE_LOCK_RAMP_S;
+          setTimeout(() => {
+            if (this.tuneToken !== token) return;
+            if (!this.inTuneSequence) return;
+            this.lockInTune(ramp);
+          }, delay);
+        } else {
+          this.setStatus("playing");
+          // Arm the pre-warm for ~30s before the expected Vercel cut.
+          this.schedulePrewarm();
+        }
       }
     });
     el.addEventListener("pause", () => {
@@ -773,8 +1010,23 @@ class AudioEngine {
       // Give up — surface a real error so the lamp turns red.
       this.intentPlaying = false;
       this.reconnectAttempts = 0;
+      this.killStatic();
       this.setStatus("error", "signal lost");
       return;
+    }
+
+    // M19: bridge the silent reconnect gap with tuning static — same FM-shhhh
+    // envelope as a manual tune, fades in over 150ms when the drop is detected
+    // and crossfades out over 300ms once the stream resumes via lockInTune.
+    // Idempotent: re-asserting on retry attempts 2/3 is a no-op when static is
+    // already at TARGET. tuneAllowOverrunSnap stays false so the lock-in uses
+    // the full 300ms crossfade rather than the manual-tune overrun snap.
+    if (!this.inTuneSequence) {
+      this.tuneToken++;
+      this.inTuneSequence = true;
+      this.tuneMinLockAt = 0;
+      this.tuneAllowOverrunSnap = false;
+      this.fadeToStatic(AudioEngine.TUNE_FADE_S);
     }
 
     const delay =
@@ -896,6 +1148,23 @@ class AudioEngine {
         // consume on demand from `captureAudioClip()`.
         this.captureDest = this.ctx.createMediaStreamDestination();
         this.analyser.connect(this.captureDest);
+
+        // M19 tuning-static. Pink-noise+crackle buffer source feeds a gain
+        // (default 0) into the analyser input — sums with slot mixes so it
+        // shares the same EQ/master/doze chain and drives VU during tunes.
+        // The source is created here but `start()` is deferred to after
+        // `ctx.resume()` below — calling start() on a still-suspended context
+        // can leave the source in a state where it never produces audio once
+        // the context finally resumes (observed on first power-on). Gating
+        // happens at `staticGain`.
+        this.staticBuffer = this.buildStaticBuffer(this.ctx);
+        this.staticGain = this.ctx.createGain();
+        this.staticGain.gain.value = 0;
+        this.staticSource = this.ctx.createBufferSource();
+        this.staticSource.buffer = this.staticBuffer;
+        this.staticSource.loop = true;
+        this.staticSource.connect(this.staticGain);
+        this.staticGain.connect(this.analyser);
         // Now that masterGain owns volume, reset element-level volume to 1
         // so the chain isn't compounding (out * out).
         for (const slot of this.slots) {
@@ -916,6 +1185,27 @@ class AudioEngine {
       } catch {}
     }
 
+    // M19 — start the static buffer source NOW that the context is running.
+    // AudioBufferSourceNode.start() can only be called once per node (it
+    // throws InvalidStateError on a second call); the flag guards repeat
+    // entry to ensureContext.
+    if (
+      this.staticSource &&
+      !this.staticSourceStarted &&
+      this.ctx.state === "running"
+    ) {
+      try {
+        this.staticSource.start(0);
+        this.staticSourceStarted = true;
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[audio] staticSource.start failed:",
+          (e as Error).message,
+        );
+      }
+    }
+
     // M18 — defensively (re-)create the capture destination if it's missing.
     // Handles the case where ensureContext ran in a prior session before M18
     // shipped, leaving us with an AudioContext that has no captureDest node.
@@ -928,6 +1218,140 @@ class AudioEngine {
         // eslint-disable-next-line no-console
         console.error("[audio] captureDest setup failed:", (e as Error).message);
       }
+    }
+  }
+
+  // --- M19 tuning-static internals ---
+
+  /**
+   * Build a 4-second pink-noise + crackle buffer for between-station static.
+   *
+   * Pink noise via Paul Kellet's IIR-cascade approximation (cheap, sounds
+   * right). A one-pole highpass thins out the bass so the result reads as
+   * "FM-shhhh between stations" rather than "AM hum". Sparse random spikes
+   * (~0.05% chance per sample, ≈22Hz at 44.1kHz, ±0.4 amplitude) add the
+   * analog-radio crackle character without becoming a popcorn track.
+   *
+   * Loops forever once `staticSource.start(0)` is called — the user only
+   * hears it when `staticGain` ramps up during a tune sequence.
+   */
+  private buildStaticBuffer(ctx: AudioContext): AudioBuffer {
+    const sr = ctx.sampleRate;
+    const length = Math.floor(sr * 4);
+    const buf = ctx.createBuffer(1, length, sr);
+    const data = buf.getChannelData(0);
+
+    let b0 = 0,
+      b1 = 0,
+      b2 = 0,
+      b3 = 0,
+      b4 = 0,
+      b5 = 0,
+      b6 = 0;
+    let prevX = 0,
+      prevY = 0;
+    const alpha = 0.95; // ~350Hz cutoff at 44.1kHz
+
+    for (let i = 0; i < length; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.969 * b2 + white * 0.153852;
+      b3 = 0.8665 * b3 + white * 0.3104856;
+      b4 = 0.55 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.016898;
+      let pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+      b6 = white * 0.115926;
+      pink *= 0.11;
+
+      // 1-pole HP to thin out the rumble.
+      const y = alpha * (prevY + pink - prevX);
+      prevX = pink;
+      prevY = y;
+      let s = y;
+
+      // Sparse crackle pops post-HP so they keep their click-like edge.
+      if (Math.random() < 0.0005) {
+        s += (Math.random() * 2 - 1) * 0.4;
+      }
+
+      data[i] = Math.max(-1, Math.min(1, s));
+    }
+    return buf;
+  }
+
+  /**
+   * Ramp the active slot's mix gain to 0 and the staticGain to TUNE_GAIN_TARGET
+   * over `rampS` seconds. Idempotent — calling repeatedly during an existing
+   * tune just re-asserts the targets.
+   */
+  private fadeToStatic(rampS: number): void {
+    if (!this.ctx || !this.staticGain) return;
+    const t = this.ctx.currentTime;
+    const active = this.slots[this.activeIdx];
+    if (active.mix) {
+      active.mix.gain.cancelScheduledValues(t);
+      active.mix.gain.setValueAtTime(active.mix.gain.value, t);
+      active.mix.gain.linearRampToValueAtTime(0, t + rampS);
+    }
+    this.staticGain.gain.cancelScheduledValues(t);
+    this.staticGain.gain.setValueAtTime(this.staticGain.gain.value, t);
+    this.staticGain.gain.linearRampToValueAtTime(
+      AudioEngine.TUNE_GAIN_TARGET,
+      t + rampS,
+    );
+  }
+
+  /**
+   * Crossfade staticGain → 0 and the active slot mix → 1 over `rampS`
+   * seconds. Clears tune-sequence state, then re-arms pre-warm and reports
+   * status="playing" once the ramp completes.
+   *
+   * Default ramp is `TUNE_LOCK_RAMP_S` (300ms); the playing-event handler
+   * passes `TUNE_LOCK_RAMP_OVERRUN_S` (50ms) when the new station took
+   * longer than the plateau to start playing — keeps the total static time
+   * close to the natural load time instead of always adding 300ms on top.
+   */
+  private lockInTune(rampS: number = AudioEngine.TUNE_LOCK_RAMP_S): void {
+    if (!this.ctx || !this.staticGain) {
+      this.inTuneSequence = false;
+      this.setStatus("playing");
+      return;
+    }
+    const t = this.ctx.currentTime;
+    const active = this.slots[this.activeIdx];
+    this.staticGain.gain.cancelScheduledValues(t);
+    this.staticGain.gain.setValueAtTime(this.staticGain.gain.value, t);
+    this.staticGain.gain.linearRampToValueAtTime(0, t + rampS);
+    if (active.mix) {
+      active.mix.gain.cancelScheduledValues(t);
+      active.mix.gain.setValueAtTime(active.mix.gain.value, t);
+      active.mix.gain.linearRampToValueAtTime(1, t + rampS);
+    }
+    this.inTuneSequence = false;
+    this.tuneMinLockAt = 0;
+    setTimeout(() => {
+      this.setStatus("playing");
+      this.schedulePrewarm();
+    }, rampS * 1000);
+  }
+
+  /**
+   * Bail out of any active tune sequence. Used by pause()/stop() so a
+   * power-off mid-tune doesn't leave staticGain stuck or a lock-in dangling.
+   * Bumps tuneToken so any pending scheduled callbacks no-op when they fire.
+   */
+  private killStatic(): void {
+    this.inTuneSequence = false;
+    this.tuneMinLockAt = 0;
+    this.tuneToken++;
+    if (this.staticGain && this.ctx) {
+      const t = this.ctx.currentTime;
+      try {
+        this.staticGain.gain.cancelScheduledValues(t);
+        this.staticGain.gain.setValueAtTime(this.staticGain.gain.value, t);
+        this.staticGain.gain.linearRampToValueAtTime(0, t + 0.1);
+      } catch {}
     }
   }
 
