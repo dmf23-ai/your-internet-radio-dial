@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
 
@@ -76,9 +76,37 @@ export default function NowPlayingLozenge() {
   // Same reduced-motion gate ScrollingCaption uses (M17 lesson — an
   // infinite CSS keyframe + the global reduced-motion override = a ~100kHz
   // strobe). When reduced-motion is on, the listening dot stays solid
-  // instead of pulsing.
+  // instead of pulsing AND the cream-window marquee is replaced with a
+  // truncated single copy.
   const [reducedMotion, setReducedMotion] = useState(false);
   const inFlightRef = useRef(false);
+
+  // Marquee state for the cream window — when the body text is wider than
+  // the visible content area, render two copies + marquee animation
+  // (mirroring DialWindow's ScrollingCaption pattern, including its global
+  // @keyframes marquee in globals.css).
+  const creamRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLSpanElement>(null);
+  const [bodyOverflow, setBodyOverflow] = useState(false);
+  const [bodyDuration, setBodyDuration] = useState(12);
+
+  // Drag-to-pan state for the reduced-motion fallback (mirrors the same
+  // mechanism in DialWindow's ScrollingCaption). When reduced-motion is
+  // on AND the body overflows, the user can click-and-drag horizontally
+  // through the cream window to read the full string.
+  const [pan, setPan] = useState(0); // resting translateX (≤ 0)
+  const [maxPan, setMaxPan] = useState(0); // most-negative allowed translate
+  const [drag, setDrag] = useState<{
+    start: number;
+    base: number;
+    current: number;
+    moved: boolean;
+  } | null>(null);
+  // One-frame click suppressor — when a pointerup ends a drag that moved
+  // beyond the threshold, the trailing click on the button parent must be
+  // swallowed so we don't also fire a song-ID capture.
+  const suppressClickRef = useRef(false);
+  const DRAG_THRESHOLD = 5;
 
   // Reset on station change. Even if a previous identification is still
   // visible, a new tune means the old result is no longer relevant.
@@ -95,7 +123,58 @@ export default function NowPlayingLozenge() {
     return () => mq.removeEventListener("change", listener);
   }, []);
 
+  // Pre-compute the body string here (rather than below the JSX) so the
+  // overflow measurement effect can depend on it.
+  const body = bodyText(state, isPlaying);
+
+  // Measure the body text against the visible cream-window width. When it
+  // overflows, switch to a marquee (two copies + global @keyframes marquee
+  // from globals.css). Mirrors the DialWindow ScrollingCaption pattern,
+  // including the document.fonts.ready re-measure for late web-font swaps.
+  useLayoutEffect(() => {
+    const cream = creamRef.current;
+    const m = measureRef.current;
+    if (!cream || !m) return;
+
+    const check = () => {
+      const w = m.scrollWidth;
+      // px-3 in the cream window eats 12px on each side; the actual
+      // content area is the inner width minus that horizontal padding.
+      const visible = cream.clientWidth - 24;
+      const needs = w > visible + 1;
+      setBodyOverflow(needs);
+      if (needs) {
+        // ~50px/sec like the dial caption, with an 8s minimum so a
+        // borderline overflow doesn't whip past too fast on the smaller
+        // lozenge surface.
+        setBodyDuration(Math.max(8, w / 50));
+        const newMax = visible - w; // negative — leftmost translateX
+        setMaxPan(newMax);
+        // Re-clamp current pan if bounds shrank (e.g. window resize).
+        setPan((p) => Math.min(0, Math.max(newMax, p)));
+      } else {
+        setMaxPan(0);
+        setPan(0);
+      }
+    };
+    check();
+    document.fonts?.ready?.then(check);
+    const ro = new ResizeObserver(check);
+    ro.observe(cream);
+    ro.observe(m);
+    return () => ro.disconnect();
+  }, [body]);
+
+  // When the body string changes (state transition or station change),
+  // reset pan to 0 so the new content starts at the left edge.
+  useLayoutEffect(() => {
+    setPan(0);
+  }, [body]);
+
   async function onTap() {
+    // If the click was synthesized at the end of a drag-pan, swallow it.
+    // Same one-frame window mechanism the dial caption uses.
+    if (suppressClickRef.current) return;
     if (inFlightRef.current) return;
     if (!stationId) {
       setState({ kind: "error", message: "no station" });
@@ -151,7 +230,41 @@ export default function NowPlayingLozenge() {
   // Tappable only when (a) not currently in flight AND (b) the radio is on.
   // When off, the lozenge dims and the body cue tells the user to tune in.
   const tappable = state.kind !== "listening" && isPlaying;
-  const body = bodyText(state, isPlaying);
+  const marquee = bodyOverflow && !reducedMotion;
+  // Drag-to-pan mode is the reduced-motion fallback for overflow text —
+  // mirrors the dial caption's behavior. dragMode and marquee are mutually
+  // exclusive; both require bodyOverflow.
+  const dragMode = bodyOverflow && reducedMotion;
+  const currentPan = drag ? drag.current : pan;
+  const clamp = (t: number) => Math.min(0, Math.max(maxPan, t));
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragMode) return;
+    // Capture the pointer on the cream window so subsequent pointermove
+    // events come back to it even if the cursor leaves the element.
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag({ start: e.clientX, base: pan, current: pan, moved: false });
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.start;
+    const next = clamp(drag.base + dx);
+    const moved = drag.moved || Math.abs(dx) > DRAG_THRESHOLD;
+    setDrag({ ...drag, current: next, moved });
+  };
+  const endDrag = () => {
+    if (!drag) return;
+    setPan(drag.current);
+    if (drag.moved) {
+      // Suppress the click that follows pointerup so the drag-release
+      // doesn't also fire onTap (and trigger an unwanted song-ID capture).
+      suppressClickRef.current = true;
+      requestAnimationFrame(() => {
+        suppressClickRef.current = false;
+      });
+    }
+    setDrag(null);
+  };
 
   return (
     <div className="flex justify-center w-full select-none">
@@ -160,10 +273,14 @@ export default function NowPlayingLozenge() {
         onClick={tappable ? onTap : undefined}
         disabled={!tappable}
         aria-label="Now playing — tap to identify the current song"
-        title="Tap to identify the current song"
+        title={
+          dragMode
+            ? "Drag the cream window to scroll · Tap to identify the current song"
+            : "Tap to identify the current song"
+        }
         className="relative w-[260px] sm:w-[320px] transition-[transform,opacity] active:translate-y-[1px] disabled:active:translate-y-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60"
         style={{
-          padding: "12px 20px 10px",
+          padding: "6px 20px 10px",
           borderRadius: 10,
           background:
             "linear-gradient(180deg, #d4a754 0%, #b48a49 45%, #8a6327 100%)",
@@ -215,9 +332,16 @@ export default function NowPlayingLozenge() {
         </div>
 
         {/* Recessed cream window — body text lives here. Inset shadow gives
-            the impression of a window cut into the face plate. */}
+            the impression of a window cut into the face plate.
+            Three render branches:
+              - dragMode (reducedMotion + overflow): single copy at
+                translateX(currentPan); user can click-drag to scroll.
+              - marquee (motion-allowed + overflow): two copies + global
+                @keyframes marquee, mirroring the dial caption.
+              - static: single copy with truncate. */}
         <div
-          className="relative mx-auto mt-1.5 rounded-[3px] overflow-hidden flex items-center justify-center px-3"
+          ref={creamRef}
+          className="relative mx-auto mt-1.5 rounded-[3px] overflow-hidden"
           style={{
             width: "94%",
             height: 32,
@@ -225,25 +349,94 @@ export default function NowPlayingLozenge() {
               "linear-gradient(180deg, #ebd9b2 0%, #d8c290 60%, #c9b07a 100%)",
             boxShadow:
               "inset 0 2px 3px rgba(0,0,0,0.55), inset 0 -1px 1px rgba(255,240,200,0.4), 0 1px 0 rgba(255,240,200,0.35)",
+            // In dragMode, the cream window itself is the drag handle;
+            // touchAction: pan-y preserves vertical page scroll on touch
+            // devices (otherwise touch drag would scroll the page).
+            cursor: dragMode ? (drag ? "grabbing" : "grab") : undefined,
+            touchAction: dragMode ? "pan-y" : undefined,
           }}
+          onPointerDown={dragMode ? onPointerDown : undefined}
+          onPointerMove={dragMode ? onPointerMove : undefined}
+          onPointerUp={dragMode ? endDrag : undefined}
+          onPointerCancel={dragMode ? endDrag : undefined}
         >
+          {dragMode ? (
+            <div
+              className={
+                "absolute inset-y-0 left-0 inline-flex items-center whitespace-nowrap px-3 " +
+                (state.kind === "success"
+                  ? "text-[14px] sm:text-[16px] font-display"
+                  : "text-[13px] sm:text-[15px] font-display tracking-[0.05em]")
+              }
+              style={{
+                color: "#1a120a",
+                fontStyle: state.kind === "listening" ? "italic" : "normal",
+                transform: `translateX(${currentPan}px)`,
+                // No transition while actively dragging (so the pan tracks
+                // the finger 1:1); a short ease-out on release for polish.
+                transition: drag ? "none" : "transform 220ms ease-out",
+                // While dragging, the inner content must not capture
+                // pointer events (capture is on the cream window outer).
+                pointerEvents: drag ? "none" : undefined,
+              }}
+            >
+              {body}
+            </div>
+          ) : marquee ? (
+            <div
+              className={
+                "absolute inset-y-0 left-0 inline-flex items-center whitespace-nowrap px-3 " +
+                (state.kind === "success"
+                  ? "text-[14px] sm:text-[16px] font-display"
+                  : "text-[13px] sm:text-[15px] font-display tracking-[0.05em]")
+              }
+              style={{
+                color: "#1a120a",
+                fontStyle: state.kind === "listening" ? "italic" : "normal",
+                animation: `marquee ${bodyDuration}s linear infinite`,
+              }}
+            >
+              <span>{body}{"  •  "}</span>
+              <span aria-hidden>{body}{"  •  "}</span>
+            </div>
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center px-3">
+              <span
+                className={
+                  "block w-full text-center truncate " +
+                  (state.kind === "success"
+                    ? "text-[14px] sm:text-[16px] font-display"
+                    : "text-[13px] sm:text-[15px] font-display tracking-[0.05em]")
+                }
+                style={{
+                  color: "#1a120a",
+                  opacity:
+                    state.kind === "idle" ||
+                    state.kind === "unknown" ||
+                    state.kind === "error"
+                      ? 0.65
+                      : 1,
+                  fontStyle: state.kind === "listening" ? "italic" : "normal",
+                }}
+              >
+                {body}
+              </span>
+            </div>
+          )}
+
+          {/* Hidden single-copy measurer — uses the same font sizing as the
+              visible body span so scrollWidth is an honest measurement of
+              the rendered text. Always present regardless of branch so the
+              ResizeObserver can re-measure across state changes. */}
           <span
+            ref={measureRef}
+            aria-hidden
             className={
-              "block w-full text-center truncate " +
+              "invisible whitespace-nowrap pointer-events-none absolute left-0 top-0 " +
               (state.kind === "success"
                 ? "text-[14px] sm:text-[16px] font-display"
                 : "text-[13px] sm:text-[15px] font-display tracking-[0.05em]")
             }
-            style={{
-              color: "#1a120a",
-              opacity:
-                state.kind === "idle" ||
-                state.kind === "unknown" ||
-                state.kind === "error"
-                  ? 0.65
-                  : 1,
-              fontStyle: state.kind === "listening" ? "italic" : "normal",
-            }}
           >
             {body}
           </span>
