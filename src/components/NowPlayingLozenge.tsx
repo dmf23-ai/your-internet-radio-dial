@@ -161,7 +161,7 @@ export default function NowPlayingLozenge() {
         disabled={!tappable}
         aria-label="Now playing — tap to identify the current song"
         title="Tap to identify the current song"
-        className="relative w-[340px] sm:w-[420px] transition-[transform,opacity] active:translate-y-[1px] disabled:active:translate-y-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60"
+        className="relative w-[260px] sm:w-[320px] transition-[transform,opacity] active:translate-y-[1px] disabled:active:translate-y-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60"
         style={{
           padding: "12px 20px 10px",
           borderRadius: 10,
