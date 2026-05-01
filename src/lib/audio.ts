@@ -121,7 +121,14 @@ function encodeWavMono16(samples: Float32Array, sampleRate: number): ArrayBuffer
 }
 
 interface Slot {
-  el: HTMLAudioElement | null;
+  // M20 experiment: widened from HTMLAudioElement to HTMLMediaElement so the
+  // engine can hold either an <audio> or a <video> element. iOS Safari
+  // historically implemented captureStream() on HTMLVideoElement before
+  // HTMLAudioElement; <video> with display:none and audio-only sources
+  // plays identically to <audio> from the user's perspective. Every property
+  // we touch (src/play/pause/load/canPlayType/readyState/paused/ended/volume/
+  // muted/crossOrigin/preload) lives on HTMLMediaElement.
+  el: HTMLMediaElement | null;
   mes: MediaElementAudioSourceNode | null;
   mix: GainNode | null;
   hls: any;
@@ -968,7 +975,7 @@ class AudioEngine {
 
   // --- internals ---
 
-  private wireEvents(el: HTMLAudioElement, idx: SlotIdx) {
+  private wireEvents(el: HTMLMediaElement, idx: SlotIdx) {
     el.addEventListener("waiting", () => {
       if (this.activeIdx === idx) this.setStatus("buffering");
     });
@@ -1284,11 +1291,27 @@ class AudioEngine {
       const idx = i as SlotIdx;
       const slot = this.slots[idx];
       if (!slot.el) {
-        const el = document.createElement("audio");
+        // M20 experiment: <video> instead of <audio>. iOS Safari historically
+        // exposed captureStream on HTMLVideoElement before HTMLAudioElement;
+        // a hidden <video> plays audio-only sources identically to <audio>
+        // from the user's perspective. Hidden via inline styles so it never
+        // takes layout space or shows controls. playsinline is REQUIRED on
+        // iOS for video elements (otherwise iOS would auto-fullscreen on
+        // play, even with display:none — set defensively).
+        const el = document.createElement("video");
         el.crossOrigin = "anonymous";
         el.preload = "none";
         (el as any).playsInline = true;
         el.setAttribute("playsinline", "");
+        // Belt-and-suspenders hide. display:none is the sledgehammer; the
+        // 0×0 + position-fixed + opacity:0 keeps it out of layout/paint
+        // even on browsers that treat display:none oddly with <video>.
+        el.style.display = "none";
+        el.style.position = "fixed";
+        el.style.width = "0";
+        el.style.height = "0";
+        el.style.opacity = "0";
+        el.style.pointerEvents = "none";
         this.wireEvents(el, idx);
         document.body.appendChild(el);
         slot.el = el;
@@ -1449,7 +1472,11 @@ class AudioEngine {
       const el0 = this.slots[0].el;
       const cap = el0 ? (el0 as any).captureStream : undefined;
       if (typeof cap !== "function") {
-        this.diagCsError = "captureStream not available on HTMLAudioElement";
+        // Tag the message with the actual element tag so we can tell apart
+        // "missing on <audio>" (the original M20 finding on iOS) from
+        // "missing on <video>" (this experiment's outcome on iOS, if so).
+        const tag = el0?.tagName?.toLowerCase() ?? "media";
+        this.diagCsError = `captureStream not available on <${tag}>`;
         return;
       }
       const stream: MediaStream = cap.call(el0);
