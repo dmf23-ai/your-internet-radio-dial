@@ -29,6 +29,20 @@ import { getAudioEngine } from "@/lib/audio";
 
 const CAPTURE_SECONDS = 8;
 
+/**
+ * AudD picks its decoder from the filename extension, so a MIME-mismatched
+ * filename (e.g. an MP4/AAC blob labelled `.webm`) makes the upstream
+ * decode fail. Desktop MediaRecorder produces `audio/webm;codecs=opus`;
+ * iOS Safari/Chrome produces `audio/mp4`. Map the actual blob.type to the
+ * right extension so both paths work.
+ */
+function filenameForMime(mime: string): string {
+  if (mime.startsWith("audio/mp4")) return "clip.m4a";
+  if (mime.startsWith("audio/webm")) return "clip.webm";
+  if (mime.startsWith("audio/ogg")) return "clip.ogg";
+  return "clip.bin";
+}
+
 type State =
   | { kind: "idle" }
   | { kind: "listening" }
@@ -193,13 +207,22 @@ export default function NowPlayingLozenge() {
 
       const form = new FormData();
       form.append("stationId", stationId);
-      form.append("audio", blob, "clip.webm");
+      form.append("audio", blob, filenameForMime(blob.type));
 
       const res = await fetch("/api/song-id", { method: "POST", body: form });
       if (!res.ok) {
+        // Try to surface the actual upstream reason from the JSON body so
+        // iOS-class failures don't all collapse to a generic "error 500".
+        let detail = `error ${res.status}`;
+        try {
+          const errBody = (await res.json()) as { error?: string };
+          if (errBody?.error) detail = errBody.error;
+        } catch {
+          // Body wasn't JSON; keep the generic status-code message.
+        }
         // eslint-disable-next-line no-console
-        console.error("[song-id] HTTP", res.status);
-        setState({ kind: "error", message: `error ${res.status}` });
+        console.error("[song-id] HTTP", res.status, detail);
+        setState({ kind: "error", message: detail });
         return;
       }
 

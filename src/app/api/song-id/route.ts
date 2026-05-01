@@ -30,6 +30,20 @@ export const maxDuration = 30;
 const CACHE_TTL_MS = 60_000;
 const AUDD_ENDPOINT = "https://api.audd.io/";
 
+/**
+ * AudD picks its decoder from the upload filename's extension. iOS
+ * Safari/Chrome's MediaRecorder produces audio/mp4 (AAC), desktop
+ * Chrome/Firefox produces audio/webm (Opus). Mismatched filename →
+ * decode fails → upstream error. Map the incoming blob's MIME to the
+ * right extension so both client paths work.
+ */
+function filenameForMime(mime: string): string {
+  if (mime.startsWith("audio/mp4")) return "clip.m4a";
+  if (mime.startsWith("audio/webm")) return "clip.webm";
+  if (mime.startsWith("audio/ogg")) return "clip.ogg";
+  return "clip.bin";
+}
+
 type SongIdResponse = {
   artist: string | null;
   title: string | null;
@@ -127,9 +141,10 @@ export async function POST(req: NextRequest) {
   try {
     const auddForm = new FormData();
     auddForm.set("api_token", auddToken);
-    // AudD accepts the field name "file"; pass the blob with a filename so
-    // the multipart wrapper has a Content-Disposition.filename param.
-    auddForm.set("file", audio, "clip.webm");
+    // AudD accepts the field name "file"; pass the blob with a filename
+    // whose extension matches the actual encoding so AudD picks the right
+    // decoder. See filenameForMime() comment above for the iOS context.
+    auddForm.set("file", audio, filenameForMime(audio.type));
 
     const res = await fetch(AUDD_ENDPOINT, {
       method: "POST",
