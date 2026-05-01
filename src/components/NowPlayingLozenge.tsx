@@ -31,12 +31,13 @@ const CAPTURE_SECONDS = 8;
 
 /**
  * AudD picks its decoder from the filename extension, so a MIME-mismatched
- * filename (e.g. an MP4/AAC blob labelled `.webm`) makes the upstream
- * decode fail. Desktop MediaRecorder produces `audio/webm;codecs=opus`;
- * iOS Safari/Chrome produces `audio/mp4`. Map the actual blob.type to the
- * right extension so both paths work.
+ * filename makes the upstream decode fail. The engine now always emits
+ * audio/wav (since iOS Safari's MediaRecorder MP4 output was producing
+ * fragmented containers AudD couldn't decode), but kept generic so a future
+ * encoder change doesn't silently regress.
  */
 function filenameForMime(mime: string): string {
+  if (mime.startsWith("audio/wav")) return "clip.wav";
   if (mime.startsWith("audio/mp4")) return "clip.m4a";
   if (mime.startsWith("audio/webm")) return "clip.webm";
   if (mime.startsWith("audio/ogg")) return "clip.ogg";

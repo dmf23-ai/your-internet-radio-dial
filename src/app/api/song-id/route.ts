@@ -31,13 +31,13 @@ const CACHE_TTL_MS = 60_000;
 const AUDD_ENDPOINT = "https://api.audd.io/";
 
 /**
- * AudD picks its decoder from the upload filename's extension. iOS
- * Safari/Chrome's MediaRecorder produces audio/mp4 (AAC), desktop
- * Chrome/Firefox produces audio/webm (Opus). Mismatched filename →
- * decode fails → upstream error. Map the incoming blob's MIME to the
- * right extension so both client paths work.
+ * AudD picks its decoder from the upload filename's extension. The client
+ * now emits audio/wav (engine encodes 16-bit PCM client-side, sidestepping
+ * iOS Safari's fragmented-MP4 issue), but the helper stays format-agnostic
+ * in case the engine swaps encoders later.
  */
 function filenameForMime(mime: string): string {
+  if (mime.startsWith("audio/wav")) return "clip.wav";
   if (mime.startsWith("audio/mp4")) return "clip.m4a";
   if (mime.startsWith("audio/webm")) return "clip.webm";
   if (mime.startsWith("audio/ogg")) return "clip.ogg";

@@ -44,12 +44,17 @@
 // pre-warm failure, etc.) we fall back to retry-with-backoff on the active
 // slot. SIGNAL LOST surfaces only after MAX_RECONNECTS consecutive failures.
 //
-// Capture tap (M18): a MediaStreamAudioDestinationNode (`captureDest`) is
-// connected in parallel to the analyser output, giving us a fan-out of the
-// source signal (post-mix, pre-EQ/volume/doze). `captureAudioClip()` records
-// from this stream via MediaRecorder for short song-ID fingerprint clips.
-// Tapping pre-volume means a muted user can still ID the current song;
-// tapping pre-doze means an in-progress fade-out doesn't silence the clip.
+// Capture tap (M18, reworked): `captureAudioClip()` taps PCM samples off
+// the analyser via a transient ScriptProcessorNode → mixes to mono →
+// encodes 16-bit WAV → returns the Blob. Originally used MediaRecorder
+// over a MediaStreamAudioDestinationNode, but iOS Safari produces
+// fragmented MP4 (no top-level moov atom) that AudD's decoder rejects.
+// WAV sidesteps the codec/container negotiation entirely. The legacy
+// `captureDest` MediaStreamAudioDestinationNode is still wired in
+// `ensureContext` for backward compatibility but is no longer used.
+// Tapping at the analyser output means pre-volume / pre-Doze / pre-EQ —
+// a muted user can still ID, an in-progress Doze fade doesn't silence
+// the clip.
 //
 // Tuning static (M19): a procedurally-generated pink-noise+crackle buffer
 // loops through `staticGain` (default 0) into the analyser input. On a
@@ -78,6 +83,42 @@ export interface AudioSnapshot {
 
 type Listener = (s: AudioSnapshot) => void;
 type SlotIdx = 0 | 1;
+
+/**
+ * Encode a Float32 sample buffer as a 16-bit PCM mono WAV file.
+ * Used by `captureAudioClip` to produce a universally-decodable blob —
+ * AudD accepts WAV without any codec ambiguity, no per-browser quirks.
+ * Buffer layout: standard 44-byte RIFF/WAVE header + raw little-endian
+ * int16 samples.
+ */
+function encodeWavMono16(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const dataBytes = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  const writeAscii = (offset: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true); // file size - 8
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);  // subchunk1 size (PCM)
+  view.setUint16(20, 1, true);   // audio format = PCM
+  view.setUint16(22, 1, true);   // num channels = mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate (mono * 16-bit)
+  view.setUint16(32, 2, true);   // block align (mono * 16-bit / 8)
+  view.setUint16(34, 16, true);  // bits per sample
+  writeAscii(36, "data");
+  view.setUint32(40, dataBytes, true);
+  let off = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return buffer;
+}
 
 interface Slot {
   el: HTMLAudioElement | null;
@@ -649,92 +690,124 @@ class AudioEngine {
     return Math.max(0, this.dozeEndAt - performance.now());
   }
 
-  // --- Song-ID capture (M18) ---
+  // --- Song-ID capture (M18, reworked) ---
 
   /**
-   * Record `seconds` of the current audio output into a Blob suitable for
-   * upload to AudD or any other fingerprinting service. Returns the captured
-   * blob (typically webm/opus, mp4 on Safari).
+   * Record `seconds` of the current audio output into a WAV Blob suitable
+   * for upload to AudD or any other fingerprinting service.
+   *
+   * **Why WAV and not MediaRecorder?** Originally this used MediaRecorder
+   * over `captureDest.stream`, picking the best supported MIME (webm/opus
+   * on desktop, mp4 on iOS). That worked on desktop but iOS Safari/Chrome
+   * produce *fragmented MP4* (moof/mdat boxes, no top-level moov atom)
+   * which AudD's decoder rejects with "Recognition failed: ... should
+   * send only audio files". Routing PCM samples through a ScriptProcessor
+   * tap and encoding WAV ourselves sidesteps the entire codec/container
+   * negotiation. Larger uploads (~96 KB/s @ 48k mono 16-bit) but bulletproof.
    *
    * Throws if the audio context isn't initialized yet (no playback has ever
-   * started), if MediaRecorder isn't supported (legacy Safari), or if no
-   * supported audio mime type is available. Callers should surface a
-   * friendly message in those cases.
-   *
-   * Captures ~8s by default — AudD's recommended minimum for reliable
-   * fingerprint matching. Longer is fine; AudD's upload cap is 25MB and an
-   * opus-encoded radio stream runs ~6-8 KB/s, so even a 60s capture is well
-   * under the limit.
+   * started). Captures ~8s by default — AudD's recommended minimum for
+   * reliable fingerprint matching.
    */
   async captureAudioClip(seconds: number = 8): Promise<Blob> {
     // If the graph isn't built yet (no playback has ever started), try
     // ensureContext() once — it's a no-op when slots haven't been wired.
-    if (!this.captureDest) {
+    if (!this.ctx || !this.analyser) {
       await this.ensureContext();
     }
-    if (!this.captureDest) {
-      throw new Error("captureDest unavailable (no audio context yet?)");
+    if (!this.ctx || !this.analyser) {
+      throw new Error("audio context unavailable (no playback yet?)");
     }
-    if (typeof MediaRecorder === "undefined") {
-      throw new Error("MediaRecorder not supported in this browser");
-    }
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4",
-      "audio/ogg;codecs=opus",
-    ];
-    const mimeType = candidates.find((t) =>
-      (MediaRecorder as any).isTypeSupported?.(t),
-    );
-    if (!mimeType) {
-      throw new Error("no supported MediaRecorder mime type");
-    }
+    const ctx = this.ctx;
+    const analyser = this.analyser;
+    const sr = ctx.sampleRate;
+    const targetSamples = Math.max(1, Math.floor(seconds * sr));
 
-    let recorder: MediaRecorder;
-    try {
-      recorder = new MediaRecorder(this.captureDest.stream, { mimeType });
-    } catch (e) {
-      throw new Error(
-        `MediaRecorder ctor failed (${mimeType}): ${(e as Error).message}`,
-      );
-    }
-    const chunks: BlobPart[] = [];
+    // ScriptProcessor is deprecated in favor of AudioWorklet but remains
+    // reliable across every current browser including iOS. Buffer size
+    // 4096 is the sweet spot — small enough to keep latency tight, large
+    // enough not to thrash the main thread. Stereo input so we keep both
+    // channels for the mono mixdown below; mono output is unused (we route
+    // through a 0-gain sink — ScriptProcessor only fires onaudioprocess
+    // when its output is connected to ctx.destination, but we don't want
+    // its output to actually become audible).
+    const proc = ctx.createScriptProcessor(4096, 2, 1);
+    const silentSink = ctx.createGain();
+    silentSink.gain.value = 0;
+    analyser.connect(proc);
+    proc.connect(silentSink);
+    silentSink.connect(ctx.destination);
+
+    const accum: Float32Array[] = [];
+    let totalSamples = 0;
+    const wallClockMs = Math.max(1000, seconds * 1000) + 1000; // +1s slack
 
     return new Promise<Blob>((resolve, reject) => {
-      recorder.addEventListener("dataavailable", (e: BlobEvent) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      });
-      recorder.addEventListener("stop", () => {
-        const blob = new Blob(chunks, { type: mimeType });
-        if (blob.size === 0) {
-          reject(new Error("captured 0-byte clip (audio not flowing?)"));
+      let settled = false;
+      const cleanup = () => {
+        try {
+          proc.onaudioprocess = null;
+        } catch {
+          /* noop */
+        }
+        try {
+          analyser.disconnect(proc);
+        } catch {
+          /* noop */
+        }
+        try {
+          proc.disconnect();
+        } catch {
+          /* noop */
+        }
+        try {
+          silentSink.disconnect();
+        } catch {
+          /* noop */
+        }
+      };
+      const finalize = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (totalSamples === 0) {
+          reject(new Error("captured 0 samples (audio not flowing?)"));
           return;
         }
-        resolve(blob);
-      });
-      recorder.addEventListener("error", (e: Event) => {
-        const err = (e as unknown as { error?: { name?: string; message?: string } }).error;
-        reject(
-          new Error(
-            `MediaRecorder error: ${err?.name ?? "unknown"} ${err?.message ?? ""}`,
-          ),
-        );
-      });
-      try {
-        recorder.start();
-        setTimeout(() => {
-          if (recorder.state !== "inactive") {
-            try {
-              recorder.stop();
-            } catch {
-              /* noop */
-            }
-          }
-        }, Math.max(1000, seconds * 1000));
-      } catch (e) {
-        reject(new Error(`MediaRecorder start() failed: ${(e as Error).message}`));
-      }
+        const want = Math.min(totalSamples, targetSamples);
+        const all = new Float32Array(want);
+        let off = 0;
+        for (const buf of accum) {
+          if (off >= want) break;
+          const take = Math.min(want - off, buf.length);
+          all.set(buf.subarray(0, take), off);
+          off += take;
+        }
+        const wav = encodeWavMono16(all, sr);
+        resolve(new Blob([wav], { type: "audio/wav" }));
+      };
+
+      proc.onaudioprocess = (e: AudioProcessingEvent) => {
+        const inBuf = e.inputBuffer;
+        const len = inBuf.length;
+        const numCh = inBuf.numberOfChannels;
+        const mono = new Float32Array(len);
+        if (numCh >= 2) {
+          const l = inBuf.getChannelData(0);
+          const r = inBuf.getChannelData(1);
+          for (let i = 0; i < len; i++) mono[i] = (l[i] + r[i]) * 0.5;
+        } else if (numCh === 1) {
+          mono.set(inBuf.getChannelData(0));
+        }
+        accum.push(mono);
+        totalSamples += len;
+        if (totalSamples >= targetSamples) finalize();
+      };
+
+      // Wall-clock failsafe — covers the case where onaudioprocess stops
+      // firing before reaching the sample target (e.g. context gets
+      // suspended, audio drops mid-capture).
+      setTimeout(finalize, wallClockMs);
     });
   }
 
