@@ -187,21 +187,32 @@ export default function TonePanel() {
   const tooltip = "Bass and Treble are not available on iPhone";
 
   return (
-    <div className="flex items-center gap-3 sm:gap-4">
-      <ToneKnob
-        label="Bass"
-        value={bass}
-        onChange={setBass}
-        disabled={iosDisabled}
-        disabledTitle={tooltip}
-      />
-      <ToneKnob
-        label="Treble"
-        value={treble}
-        onChange={setTreble}
-        disabled={iosDisabled}
-        disabledTitle={tooltip}
-      />
+    <div className="flex flex-col items-center">
+      <div className="flex items-center gap-3 sm:gap-4">
+        <ToneKnob
+          label="Bass"
+          value={bass}
+          onChange={setBass}
+          disabled={iosDisabled}
+          disabledTitle={tooltip}
+        />
+        <ToneKnob
+          label="Treble"
+          value={treble}
+          onChange={setTreble}
+          disabled={iosDisabled}
+          disabledTitle={tooltip}
+        />
+      </div>
+      {iosDisabled && (
+        // iOS: the `title`-attribute tooltip on the disabled knobs is invisible
+        // on touch devices (long-press doesn't surface it). A persistent
+        // inline caption tells the user why they're greyed out without
+        // requiring any interaction.
+        <span className="mt-1 font-display text-[9px] uppercase tracking-[0.18em] text-brass-300/60 text-center">
+          iPhone: not available
+        </span>
+      )}
     </div>
   );
 }

@@ -67,7 +67,6 @@
 // so it obeys the user's volume + tone + Doze fade and drives the VU meter.
 
 import type { StreamType } from "@/data/seed";
-import { isIos } from "./isIos";
 
 export type AudioStatus =
   | "idle"
@@ -558,19 +557,19 @@ class AudioEngine {
     const out = clamped * clamped; // curved — more natural to the ear
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(out, this.ctx.currentTime, 0.01);
-    }
-    // Write to el.volume in two cases:
-    //   (a) iOS — masterGain is silent because of the iOS WebKit MES bug,
-    //       so el.volume is the only path that actually attenuates audible
-    //       audio on iPhone. The masterGain write above is a no-op there
-    //       but harmless.
-    //   (b) No context yet (very first user gesture) — fallback before the
-    //       audio graph is built.
-    if (isIos() || !this.masterGain || !this.ctx) {
+    } else {
+      // Fallback before context exists. Once the graph is up, masterGain
+      // takes over and element volume is reset to 1 (see ensureContext).
       for (const slot of this.slots) {
         if (slot.el) slot.el.volume = out;
       }
     }
+    // Note: on iOS, neither masterGain (silent due to the WebKit MES bug)
+    // nor `el.volume` (Apple silently ignores programmatic writes on
+    // <audio> elements as a platform policy — only hardware buttons control
+    // output level) actually changes the audible level. The volume knob is
+    // greyed out in VolumeKnob.tsx with a "hardware buttons only" caption
+    // to set expectations.
   }
 
   getVolume(): number {
@@ -1276,13 +1275,12 @@ class AudioEngine {
         this.staticSource.loop = true;
         this.staticSource.connect(this.staticGain);
         this.staticGain.connect(this.analyser);
-        // On non-iOS, masterGain owns volume — reset element-level volume
-        // to 1 so the chain isn't compounding (out * out). On iOS, masterGain
-        // is silent (the WebKit MES bug), so el.volume IS the audible
-        // volume control — initialize it to the user's current setting.
-        const elVol = isIos() ? this.volume * this.volume : 1;
+        // masterGain owns volume — reset element-level volume to 1 so the
+        // chain isn't compounding (out * out). On iOS this write is a no-op
+        // (Apple ignores programmatic volume writes on <audio>), but
+        // harmless; the iOS volume knob is greyed out in the UI anyway.
         for (const slot of this.slots) {
-          if (slot.el) slot.el.volume = elVol;
+          if (slot.el) slot.el.volume = 1;
         }
         this.snapshot = { ...this.snapshot, meterAvailable: true };
         this.emit();

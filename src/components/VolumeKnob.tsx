@@ -7,12 +7,22 @@
  * Ring is labeled OFF ... MAX with 7 tick dots.
  */
 
+import { useEffect, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { useRotaryKnob } from "@/lib/useRotaryKnob";
+import { isIos } from "@/lib/isIos";
 
 export default function VolumeKnob() {
   const volume = useRadioStore((s) => s.volume);
   const setVolume = useRadioStore((s) => s.setVolume);
+
+  // iOS: neither masterGain (silent due to the WebKit MES bug) nor el.volume
+  // (Apple ignores programmatic writes on <audio> as platform policy)
+  // actually attenuates audible audio. Grey the knob and show a persistent
+  // caption explaining hardware-button-only control. Detected after
+  // hydration to keep SSR markup consistent.
+  const [iosDisabled, setIosDisabled] = useState(false);
+  useEffect(() => setIosDisabled(isIos()), []);
 
   const { angle, bind } = useRotaryKnob({
     value: volume,
@@ -30,8 +40,30 @@ export default function VolumeKnob() {
   const labelRadius = 76;
 
   return (
-    <div className="flex flex-col items-center select-none">
-      <div className="relative" style={{ width: 160, height: 160 }}>
+    <div
+      className="flex flex-col items-center select-none"
+      title={
+        iosDisabled
+          ? "Volume on iPhone is controlled by the hardware buttons (Apple platform policy)"
+          : undefined
+      }
+    >
+      <div
+        className="relative"
+        style={{
+          width: 160,
+          height: 160,
+          opacity: iosDisabled ? 0.4 : 1,
+          pointerEvents: iosDisabled ? "none" : undefined,
+        }}
+      >
+        {iosDisabled && (
+          <span
+            aria-hidden
+            className="absolute inset-0 z-10"
+            style={{ cursor: "not-allowed" }}
+          />
+        )}
         {/* tick dots every 45° from -135 to +135 */}
         {Array.from({ length: 7 }).map((_, i) => {
           const a = -135 + i * 45;
@@ -131,9 +163,20 @@ export default function VolumeKnob() {
           </div>
         </div>
       </div>
-      <span className="-mt-3 font-display tracking-[0.25em] uppercase text-xs text-brass-300">
+      <span
+        className="-mt-3 font-display tracking-[0.25em] uppercase text-xs text-brass-300"
+        style={{ opacity: iosDisabled ? 0.5 : 1 }}
+      >
         Volume
       </span>
+      {iosDisabled && (
+        <span
+          className="mt-0.5 font-display text-[9px] uppercase tracking-[0.18em] text-brass-300/60 text-center"
+          style={{ maxWidth: 160 }}
+        >
+          iPhone: use hardware buttons
+        </span>
+      )}
     </div>
   );
 }
