@@ -937,6 +937,11 @@ class AudioEngine {
     peak: number;
     trackState: string;
   }> {
+    // Retry the wire here — by the time the user taps NOW PLAYING, audio
+    // has been actively playing for a while, so browsers (e.g. Chrome) that
+    // only populate the captureStream's audio track after playback is live
+    // will now succeed.
+    this.tryWireCaptureStreamDiag();
     const startTs = performance.now();
     let peak = 0;
     let lastSnap = this.getCaptureStreamDiag();
@@ -1424,41 +1429,50 @@ class AudioEngine {
       }
     }
 
-    // M20 diagnostic — wire a parallel captureStream tap on slot[0]. Inert
-    // (not connected to destination, element not muted) — purely for reading
-    // peak amplitude to verify whether captureStream actually carries
-    // decoded samples on iOS Safari (where MES is silent). Re-attempted on
-    // each ensureContext entry until it succeeds, since some browsers may
-    // return a no-track stream until the element actually has a src.
-    if (this.ctx && !this.diagCsSupported) {
-      try {
-        const el0 = this.slots[0].el;
-        const cap = el0 ? (el0 as any).captureStream : undefined;
-        if (typeof cap !== "function") {
-          this.diagCsError = "captureStream not available on HTMLAudioElement";
-        } else {
-          const stream: MediaStream = cap.call(el0);
-          if (!stream || stream.getAudioTracks().length === 0) {
-            // Stream exists but no audio track yet — likely because no src
-            // is loaded. Leave diagCsSupported false so we re-attempt on the
-            // next ensureContext call (which fires on every play()).
-            this.diagCsError = "captureStream returned no audio track yet";
-          } else {
-            const src = this.ctx.createMediaStreamSource(stream);
-            const a = this.ctx.createAnalyser();
-            a.fftSize = 1024;
-            src.connect(a);
-            this.diagCsStream = stream;
-            this.diagCsSrc = src;
-            this.diagCsAnalyser = a;
-            this.diagCsBuf = new Uint8Array(new ArrayBuffer(a.fftSize));
-            this.diagCsSupported = true;
-            this.diagCsError = null;
-          }
-        }
-      } catch (e) {
-        this.diagCsError = `captureStream wire failed: ${(e as Error).message}`;
+    // M20 diagnostic — try to wire the parallel captureStream tap. Helper
+    // is also called from sampleCaptureStreamDiag right before sampling, so
+    // browsers that only populate the audio track after playback is live
+    // (e.g. desktop Chrome) get a fresh attempt at the moment we need it.
+    this.tryWireCaptureStreamDiag();
+  }
+
+  /**
+   * M20 diagnostic — attempt to wire a parallel captureStream tap on slot[0].
+   * Inert (not connected to destination, element not muted) — purely for
+   * reading peak amplitude to verify whether captureStream actually carries
+   * decoded samples on iOS Safari (where MES is silent). Idempotent: bails
+   * once `diagCsSupported` is true. Safe to call repeatedly.
+   */
+  private tryWireCaptureStreamDiag(): void {
+    if (!this.ctx || this.diagCsSupported) return;
+    try {
+      const el0 = this.slots[0].el;
+      const cap = el0 ? (el0 as any).captureStream : undefined;
+      if (typeof cap !== "function") {
+        this.diagCsError = "captureStream not available on HTMLAudioElement";
+        return;
       }
+      const stream: MediaStream = cap.call(el0);
+      if (!stream || stream.getAudioTracks().length === 0) {
+        // Stream exists but no audio track yet — Chrome only populates the
+        // track after playback is actively decoding. Leave diagCsSupported
+        // false so the next call (e.g. from sampleCaptureStreamDiag at tap
+        // time) re-attempts when audio is rolling.
+        this.diagCsError = "captureStream returned no audio track yet";
+        return;
+      }
+      const src = this.ctx.createMediaStreamSource(stream);
+      const a = this.ctx.createAnalyser();
+      a.fftSize = 1024;
+      src.connect(a);
+      this.diagCsStream = stream;
+      this.diagCsSrc = src;
+      this.diagCsAnalyser = a;
+      this.diagCsBuf = new Uint8Array(new ArrayBuffer(a.fftSize));
+      this.diagCsSupported = true;
+      this.diagCsError = null;
+    } catch (e) {
+      this.diagCsError = `captureStream wire failed: ${(e as Error).message}`;
     }
   }
 
