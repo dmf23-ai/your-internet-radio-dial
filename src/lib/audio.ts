@@ -149,6 +149,21 @@ class AudioEngine {
   private captureDest: MediaStreamAudioDestinationNode | null = null;
   private timeBuf: Uint8Array<ArrayBuffer> | null = null;
 
+  // M20 captureStream diagnostic. Parallel, inert tap on slot[0] via
+  // `el.captureStream() → createMediaStreamSource → analyser`. Lets us check
+  // whether captureStream actually carries decoded samples on iOS Safari
+  // (where the existing MediaElementAudioSourceNode path is silent). Wired
+  // lazily in ensureContext; not connected to destination, doesn't mute the
+  // element, doesn't change audible behavior on any platform. Read via
+  // `getCaptureStreamDiag()` / `sampleCaptureStreamDiag()`. Removed once
+  // M20 itself ships.
+  private diagCsStream: MediaStream | null = null;
+  private diagCsSrc: MediaStreamAudioSourceNode | null = null;
+  private diagCsAnalyser: AnalyserNode | null = null;
+  private diagCsBuf: Uint8Array<ArrayBuffer> | null = null;
+  private diagCsSupported = false;
+  private diagCsError: string | null = null;
+
   // Tone (M13). Stored in dB so they survive context (re)init, and applied
   // to the BiquadFilterNodes once `ensureContext` has built the graph.
   private bassDb = 0;
@@ -861,6 +876,91 @@ class AudioEngine {
     return Math.min(1, rms * 2.2);
   }
 
+  // --- M20 captureStream diagnostic ---
+
+  /**
+   * Snapshot read of the parallel captureStream tap on slot[0]. Returns the
+   * current peak amplitude (0..1) over the analyser's ~21ms window. Used to
+   * verify whether captureStream actually carries decoded samples on iOS
+   * Safari (where the existing MediaElementAudioSourceNode path is silent).
+   *
+   * `peak` near zero AND audio audibly playing → captureStream has the same
+   * silent-tap problem as MES on this browser, M20 plan won't work.
+   * `peak` non-zero → captureStream carries signal, M20 is viable.
+   */
+  getCaptureStreamDiag(): {
+    supported: boolean;
+    error: string | null;
+    peak: number;
+    trackState: string;
+  } {
+    const trackState =
+      this.diagCsStream?.getAudioTracks()[0]?.readyState ?? "no-track";
+    if (!this.diagCsSupported) {
+      return { supported: false, error: this.diagCsError, peak: 0, trackState };
+    }
+    if (!this.diagCsAnalyser || !this.diagCsBuf) {
+      return {
+        supported: true,
+        error: "diagnostic analyser missing",
+        peak: 0,
+        trackState,
+      };
+    }
+    try {
+      this.diagCsAnalyser.getByteTimeDomainData(this.diagCsBuf);
+    } catch (e) {
+      return {
+        supported: true,
+        error: (e as Error).message,
+        peak: 0,
+        trackState,
+      };
+    }
+    let peak = 0;
+    for (let i = 0; i < this.diagCsBuf.length; i++) {
+      const v = Math.abs((this.diagCsBuf[i] - 128) / 128);
+      if (v > peak) peak = v;
+    }
+    return { supported: true, error: null, peak, trackState };
+  }
+
+  /**
+   * Sample the captureStream diagnostic at 100ms intervals over `durationMs`,
+   * return the maximum peak observed. Single snapshots can land in a quiet
+   * moment of music and read near-zero even when the stream is healthy;
+   * sampling over the full song-ID capture window gives us a robust answer.
+   */
+  async sampleCaptureStreamDiag(durationMs: number): Promise<{
+    supported: boolean;
+    error: string | null;
+    peak: number;
+    trackState: string;
+  }> {
+    const startTs = performance.now();
+    let peak = 0;
+    let lastSnap = this.getCaptureStreamDiag();
+    if (!lastSnap.supported) return lastSnap;
+    return new Promise((resolve) => {
+      const tick = () => {
+        const r = this.getCaptureStreamDiag();
+        if (r.peak > peak) peak = r.peak;
+        lastSnap = r;
+        if (performance.now() - startTs >= durationMs) {
+          resolve({
+            supported: true,
+            error: lastSnap.error,
+            peak,
+            trackState: lastSnap.trackState,
+          });
+        } else {
+          setTimeout(tick, 100);
+        }
+      };
+      tick();
+    });
+  }
+
   // --- internals ---
 
   private wireEvents(el: HTMLAudioElement, idx: SlotIdx) {
@@ -1321,6 +1421,43 @@ class AudioEngine {
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("[audio] captureDest setup failed:", (e as Error).message);
+      }
+    }
+
+    // M20 diagnostic — wire a parallel captureStream tap on slot[0]. Inert
+    // (not connected to destination, element not muted) — purely for reading
+    // peak amplitude to verify whether captureStream actually carries
+    // decoded samples on iOS Safari (where MES is silent). Re-attempted on
+    // each ensureContext entry until it succeeds, since some browsers may
+    // return a no-track stream until the element actually has a src.
+    if (this.ctx && !this.diagCsSupported) {
+      try {
+        const el0 = this.slots[0].el;
+        const cap = el0 ? (el0 as any).captureStream : undefined;
+        if (typeof cap !== "function") {
+          this.diagCsError = "captureStream not available on HTMLAudioElement";
+        } else {
+          const stream: MediaStream = cap.call(el0);
+          if (!stream || stream.getAudioTracks().length === 0) {
+            // Stream exists but no audio track yet — likely because no src
+            // is loaded. Leave diagCsSupported false so we re-attempt on the
+            // next ensureContext call (which fires on every play()).
+            this.diagCsError = "captureStream returned no audio track yet";
+          } else {
+            const src = this.ctx.createMediaStreamSource(stream);
+            const a = this.ctx.createAnalyser();
+            a.fftSize = 1024;
+            src.connect(a);
+            this.diagCsStream = stream;
+            this.diagCsSrc = src;
+            this.diagCsAnalyser = a;
+            this.diagCsBuf = new Uint8Array(new ArrayBuffer(a.fftSize));
+            this.diagCsSupported = true;
+            this.diagCsError = null;
+          }
+        }
+      } catch (e) {
+        this.diagCsError = `captureStream wire failed: ${(e as Error).message}`;
       }
     }
   }

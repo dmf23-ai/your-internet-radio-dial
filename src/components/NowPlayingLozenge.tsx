@@ -204,10 +204,22 @@ export default function NowPlayingLozenge() {
     setState({ kind: "listening" });
 
     try {
-      const cap = await getAudioEngine().captureAudioClip(CAPTURE_SECONDS);
+      // M20 diagnostic: sample the parallel captureStream tap at the same
+      // time as the existing analyser-tap capture, so the resulting `cs=…`
+      // value reflects whatever captureStream was carrying during the same
+      // 8s window. On iOS, peak from the existing tap (`pk=`) is expected
+      // to be 0; if `cs=` is non-zero, M20 (captureStream rewire) is viable.
+      const engine = getAudioEngine();
+      const [cap, csDiag] = await Promise.all([
+        engine.captureAudioClip(CAPTURE_SECONDS),
+        engine.sampleCaptureStreamDiag(CAPTURE_SECONDS * 1000),
+      ]);
       const { blob, peakAmplitude, durationMs, fireCount } = cap;
       const sizeKb = (blob.size / 1024).toFixed(0);
-      const stats = `${sizeKb}KB ${durationMs}ms pk=${peakAmplitude.toFixed(2)} n=${fireCount}`;
+      const csStr = csDiag.supported
+        ? ` cs=${csDiag.peak.toFixed(2)}(${csDiag.trackState})`
+        : ` cs=N/A(${csDiag.error ?? "?"})`;
+      const stats = `${sizeKb}KB ${durationMs}ms pk=${peakAmplitude.toFixed(2)} n=${fireCount}${csStr}`;
       // eslint-disable-next-line no-console
       console.log("[song-id] capture:", stats);
 
