@@ -18,6 +18,7 @@ import ScanButton from "./ScanButton";
 import NowPlayingLozenge from "./NowPlayingLozenge";
 import { PowerButton, OnAirLamp } from "./Lamps";
 import { useRadioStore } from "@/lib/store";
+import { useStationURL } from "@/lib/useStationURL";
 
 /**
  * Console — the static cabinet frame.
@@ -27,6 +28,10 @@ import { useRadioStore } from "@/lib/store";
 export default function Console() {
   const setAboutOpen = useRadioStore((s) => s.setAboutOpen);
   const setSuggestionBoxOpen = useRadioStore((s) => s.setSuggestionBoxOpen);
+
+  // M21 — read ?station= on mount, write back on settle, keep document.title
+  // synced to the current station. No-op until the store is hydrated.
+  useStationURL();
 
   return (
     <div className="w-full max-w-[1100px]">
