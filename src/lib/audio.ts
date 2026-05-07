@@ -67,6 +67,7 @@
 // so it obeys the user's volume + tone + Doze fade and drives the VU meter.
 
 import type { StreamType } from "@/data/seed";
+import { isWebKitDegraded } from "@/lib/isIos";
 
 export type AudioStatus =
   | "idle"
@@ -564,12 +565,20 @@ class AudioEngine {
         if (slot.el) slot.el.volume = out;
       }
     }
-    // Note: on iOS, neither masterGain (silent due to the WebKit MES bug)
-    // nor `el.volume` (Apple silently ignores programmatic writes on
-    // <audio> elements as a platform policy — only hardware buttons control
-    // output level) actually changes the audible level. The volume knob is
-    // greyed out in VolumeKnob.tsx with a "hardware buttons only" caption
-    // to set expectations.
+    // M22: On WebKit-degraded browsers (iOS Safari + macOS Safari) the
+    // masterGain chain is silent — the MES silent-tap bug means nothing
+    // reaches ctx.destination — yet the audio element itself plays through
+    // a separate path. So also write `el.volume` to actually attenuate
+    // what the user hears. On macOS Safari this works (volume knob is
+    // functional). On iOS this write is a no-op (Apple ignores programmatic
+    // volume writes per platform policy — only hardware buttons control
+    // output level), and VolumeKnob is greyed out anyway with a "hardware
+    // buttons only" caption to set expectations.
+    if (isWebKitDegraded()) {
+      for (const slot of this.slots) {
+        if (slot.el) slot.el.volume = out;
+      }
+    }
   }
 
   getVolume(): number {
@@ -1276,11 +1285,17 @@ class AudioEngine {
         this.staticSource.connect(this.staticGain);
         this.staticGain.connect(this.analyser);
         // masterGain owns volume — reset element-level volume to 1 so the
-        // chain isn't compounding (out * out). On iOS this write is a no-op
-        // (Apple ignores programmatic volume writes on <audio>), but
-        // harmless; the iOS volume knob is greyed out in the UI anyway.
-        for (const slot of this.slots) {
-          if (slot.el) slot.el.volume = 1;
+        // chain isn't compounding (out * out). M22: skip the reset on
+        // WebKit-degraded browsers, where masterGain is silent (the MES
+        // bug) and `el.volume` is what actually attenuates audible output.
+        // Resetting to 1 here would override the user's saved volume on
+        // macOS Safari the moment the graph comes up. On iOS the reset is
+        // already a no-op (Apple ignores programmatic writes), but skipping
+        // it is fine and keeps the branches symmetric.
+        if (!isWebKitDegraded()) {
+          for (const slot of this.slots) {
+            if (slot.el) slot.el.volume = 1;
+          }
         }
         this.snapshot = { ...this.snapshot, meterAvailable: true };
         this.emit();

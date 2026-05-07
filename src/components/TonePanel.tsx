@@ -17,7 +17,7 @@
 import { useEffect, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { useRotaryKnob } from "@/lib/useRotaryKnob";
-import { isIos } from "@/lib/isIos";
+import { isWebKitDegraded } from "@/lib/isIos";
 
 interface ToneKnobProps {
   label: string;
@@ -177,14 +177,15 @@ export default function TonePanel() {
   const setBass = useRadioStore((s) => s.setBass);
   const setTreble = useRadioStore((s) => s.setTreble);
 
-  // Detect iOS lazily so SSR / first render doesn't see `true` and emit a
-  // hydration-mismatched DOM (iOS detection requires `navigator`, which only
-  // exists client-side). Default false → matches the SSR pass; effect flips
-  // it on the iOS render after hydration.
+  // Detect WebKit-degraded (iOS Safari + macOS Safari) lazily so SSR / first
+  // render doesn't see `true` and emit a hydration-mismatched DOM (detection
+  // requires `navigator`, which only exists client-side). Default false →
+  // matches the SSR pass; effect flips it on the affected render after
+  // hydration.
   const [iosDisabled, setIosDisabled] = useState(false);
-  useEffect(() => setIosDisabled(isIos()), []);
+  useEffect(() => setIosDisabled(isWebKitDegraded()), []);
 
-  const tooltip = "Bass and Treble are not available on iPhone";
+  const tooltip = "Bass and Treble are not available in Safari";
 
   return (
     <div className="flex flex-col items-center">
@@ -205,12 +206,12 @@ export default function TonePanel() {
         />
       </div>
       {iosDisabled && (
-        // iOS: the `title`-attribute tooltip on the disabled knobs is invisible
-        // on touch devices (long-press doesn't surface it). A persistent
-        // inline caption tells the user why they're greyed out without
-        // requiring any interaction.
+        // The `title`-attribute tooltip on the disabled knobs is invisible
+        // on touch devices (long-press doesn't surface it) and easy to miss
+        // on desktop. A persistent inline caption tells the user why
+        // they're greyed out without requiring any interaction.
         <span className="mt-1 font-display text-[9px] uppercase tracking-[0.18em] text-brass-300/60 text-center">
-          iPhone: not available
+          Safari: not available
         </span>
       )}
     </div>

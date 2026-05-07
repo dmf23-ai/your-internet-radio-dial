@@ -34,3 +34,52 @@ export function isIos(): boolean {
   }
   return false;
 }
+
+/**
+ * macOS Safari detection (M22). Same WebKit MES silent-tap bug as iOS — the
+ * analyser node receives zero samples, so VU meter, Bass/Treble, and song-ID
+ * capture are all dead. UNLIKE iOS, programmatic `el.volume` writes are
+ * honored on macOS (no Apple hardware-button platform policy on the desktop),
+ * so the VolumeKnob can still work via an `el.volume` fallback in the audio
+ * engine (see audio.ts setVolume).
+ *
+ * Detection requires Safari in the UA AND none of the Chromium/Firefox-
+ * branded markers (those browsers all advertise "Safari" in their UA strings
+ * for compatibility), AND macOS as the platform, AND not iPad-as-Mac (which
+ * is_isIos's domain).
+ */
+export function isMacSafari(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  // iOS family handled by isIos() — bail.
+  if (/iPad|iPhone|iPod/.test(ua)) return false;
+  // iPadOS-as-Mac handled by isIos() — bail.
+  if (
+    navigator.platform === "MacIntel" &&
+    typeof navigator.maxTouchPoints === "number" &&
+    navigator.maxTouchPoints > 1
+  ) {
+    return false;
+  }
+  // Must be running on macOS hardware.
+  const isMac =
+    /Macintosh/.test(ua) || navigator.platform === "MacIntel";
+  if (!isMac) return false;
+  // Must be Safari proper — exclude Chromium-family and Firefox-iOS-style
+  // browsers that include "Safari" in their UA for compatibility.
+  const isSafari =
+    /Safari/.test(ua) &&
+    !/Chrome|Chromium|CriOS|FxiOS|Edg\/|OPR\//.test(ua);
+  return isSafari;
+}
+
+/**
+ * True for any WebKit-based browser that exhibits the MES silent-tap bug:
+ * iOS (all browsers there are forced to WebKit) plus macOS Safari. Used by
+ * the three components whose features depend on the analyser tap (VUMeter,
+ * TonePanel, NowPlayingLozenge). NOT used by VolumeKnob — that one stays
+ * gated on isIos() because macOS Safari can use the el.volume fallback.
+ */
+export function isWebKitDegraded(): boolean {
+  return isIos() || isMacSafari();
+}

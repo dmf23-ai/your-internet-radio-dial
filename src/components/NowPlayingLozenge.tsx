@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
-import { isIos } from "@/lib/isIos";
+import { isWebKitDegraded } from "@/lib/isIos";
 
 /**
  * NowPlayingLozenge — tap-to-identify song-ID plaque (M18).
@@ -57,7 +57,7 @@ function bodyText(state: State, isPlaying: boolean, iosMode: boolean): string {
   // silent on iOS Safari (WebKit MES bug). Show a fixed message and ignore
   // state transitions; the tap handler is also disabled in this mode.
   if (iosMode) {
-    return "Song identification not available on iPhone";
+    return "Song identification not available in Safari";
   }
   // Gate the body text on isPlaying *before* the state machine, so the
   // user sees a clear "tune in first" cue instead of a cryptic error
@@ -104,7 +104,7 @@ export default function NowPlayingLozenge() {
   // iOS gate — see bodyText for the underlying reason. Detected after
   // hydration to keep SSR markup consistent.
   const [iosMode, setIosMode] = useState(false);
-  useEffect(() => setIosMode(isIos()), []);
+  useEffect(() => setIosMode(isWebKitDegraded()), []);
   const inFlightRef = useRef(false);
 
   // Marquee state for the cream window — when the body text is wider than
@@ -326,12 +326,12 @@ export default function NowPlayingLozenge() {
         disabled={!tappable}
         aria-label={
           iosMode
-            ? "Now playing — song identification is not available on iPhone"
+            ? "Now playing — song identification is not available in Safari"
             : "Now playing — tap to identify the current song"
         }
         title={
           iosMode
-            ? "Song identification not available on iPhone"
+            ? "Song identification not available in Safari"
             : dragMode
               ? "Drag the cream window to scroll · Tap to identify the current song"
               : "Tap to identify the current song"

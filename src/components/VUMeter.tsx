@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
-import { isIos } from "@/lib/isIos";
+import { isWebKitDegraded } from "@/lib/isIos";
 
 /**
  * VUMeter — analog level meter.
@@ -113,12 +113,13 @@ export default function VUMeter() {
     };
   }, [status, meterAvailable, cx, cy]);
 
-  // iOS: the analyser receives zero samples (WebKit MES bug), so the meter
-  // would always be parked — show a permanent "VU meter not available on
-  // iPhone" overlay rather than the sometimes-pulsing/sometimes-zero
-  // ambiguity. Detected after hydration to keep SSR markup consistent.
+  // WebKit-degraded (iOS Safari + macOS Safari): the analyser receives
+  // zero samples (MES bug), so the meter would always be parked — show a
+  // permanent "VU meter not available in Safari" overlay rather than the
+  // sometimes-pulsing/sometimes-zero ambiguity. Detected after hydration to
+  // keep SSR markup consistent.
   const [iosMode, setIosMode] = useState(false);
-  useEffect(() => setIosMode(isIos()), []);
+  useEffect(() => setIosMode(isWebKitDegraded()), []);
 
   const showMeterBadge =
     !iosMode &&
@@ -223,9 +224,9 @@ export default function VUMeter() {
               meter unavailable
             </span>
           )}
-          {/* iOS overlay — covers the dial face with a clear, two-line
-              explanation. Grey ink on the cream meter face matches the
-              "engraved on the panel" reading; pointer-events:none so the
+          {/* WebKit-degraded overlay — covers the dial face with a clear,
+              two-line explanation. Grey ink on the cream meter face matches
+              the "engraved on the panel" reading; pointer-events:none so the
               underlying SVG is still inspectable in DevTools. */}
           {iosMode && (
             <div
@@ -241,7 +242,7 @@ export default function VUMeter() {
                 <br />
                 not available
                 <br />
-                on iPhone
+                in Safari
               </span>
             </div>
           )}
