@@ -8,6 +8,7 @@ import {
 } from "@/lib/supabase/client";
 import { pullFromCloud, syncToCloud } from "@/lib/supabase/sync";
 import { CURRENT_VERSION } from "@/lib/storage";
+import { trackPageView, trackSessionHeartbeat } from "@/lib/analytics";
 
 export default function StoreHydrator({
   children,
@@ -82,6 +83,11 @@ export default function StoreHydrator({
       //    every default band still has at least one station.
       if (cancelled) return;
       await restoreEmptySeedBands();
+
+      // 5. M23 — log a page_view event now that the session is established.
+      //    Fires once per app mount; placed after session bootstrap so the
+      //    event row gets the user's real uid attached.
+      trackPageView();
     })();
 
     return () => {
@@ -156,6 +162,57 @@ export default function StoreHydrator({
     });
     return unsubscribe;
   }, [setUser, applyCloudSnapshot, restoreEmptySeedBands]);
+
+  // M23 — listening-time heartbeat. Fires every 60s while audio is actively
+  // playing, recording the currently-tuned station. Total listening minutes
+  // = count(heartbeat) × 60s; per-station listen time is just bucketed by
+  // station_id. Skipped while buffering/tuning/idle/error so dead air or
+  // reconnect attempts don't pad the numbers.
+  //
+  // Subscribes via useRadioStore.subscribe so the interval reacts to
+  // play/pause without a re-render loop. The store reference itself is
+  // stable across the component's lifetime, so the empty deps array is
+  // intentional — this effect mounts/unmounts with the hydrator.
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const startHeartbeat = () => {
+      if (intervalId !== null) return;
+      // First tick after 60s, not immediately — page_view already covers the
+      // "user is here" signal at t=0.
+      intervalId = setInterval(() => {
+        const s = useRadioStore.getState();
+        if (s.playback.status !== "playing") return;
+        trackSessionHeartbeat(s.currentStationId ?? null);
+      }, 60_000);
+    };
+    const stopHeartbeat = () => {
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    // Sync to current state (in case audio was already playing on mount).
+    if (useRadioStore.getState().playback.status === "playing") {
+      startHeartbeat();
+    }
+
+    // React to status changes. The selector returns the status string so the
+    // listener only fires when it actually changes — not on every store write.
+    const unsubscribe = useRadioStore.subscribe((s, prev) => {
+      const status = s.playback.status;
+      const prevStatus = prev.playback.status;
+      if (status === prevStatus) return;
+      if (status === "playing") startHeartbeat();
+      else stopHeartbeat();
+    });
+
+    return () => {
+      stopHeartbeat();
+      unsubscribe();
+    };
+  }, []);
 
   return <>{children}</>;
 }

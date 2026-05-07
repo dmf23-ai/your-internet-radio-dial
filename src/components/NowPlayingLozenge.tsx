@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRadioStore } from "@/lib/store";
 import { getAudioEngine } from "@/lib/audio";
 import { isWebKitDegraded } from "@/lib/isIos";
+import { trackSongIdRequest } from "@/lib/analytics";
 
 /**
  * NowPlayingLozenge — tap-to-identify song-ID plaque (M18).
@@ -259,7 +260,12 @@ export default function NowPlayingLozenge() {
         cached: boolean;
       };
 
-      if (!data.artist && !data.title) {
+      const hit = Boolean(data.artist || data.title);
+      // M23 — log the song-ID request. `hit` distinguishes successful
+      // identifications from "AudD couldn't match", which the dashboard
+      // surfaces as a hit-rate percentage.
+      trackSongIdRequest(stationId, hit);
+      if (!hit) {
         setState({ kind: "unknown" });
       } else {
         setState({

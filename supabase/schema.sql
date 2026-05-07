@@ -263,3 +263,56 @@ create policy "song_id_cache_insert_any" on public.song_id_cache
   for insert with check (true);
 create policy "song_id_cache_update_any" on public.song_id_cache
   for update using (true) with check (true);
+
+-- ============================================================================
+-- Events (M23) — generic analytics log
+--
+-- Append-only event stream powering the /admin dashboard. One row per
+-- interesting thing: every page mount, every station tune (including scans
+-- and reconnects, distinguished by metadata.source), every song-ID button
+-- press, and a heartbeat every 60s while audio is actively playing.
+--
+-- user_id is nullable — we attach the caller's anon/permanent uid when a
+-- session exists but never block the insert if it doesn't. on delete set
+-- null so a user signing out (and the next anon session creating a new uid)
+-- doesn't drop the historical events from the log.
+--
+-- RLS: anon key may INSERT but cannot SELECT/UPDATE/DELETE. Aggregation
+-- reads run from /api/admin/metrics using the service-role key (server
+-- only), gated by the caller's email matching the admin email.
+-- ============================================================================
+
+create table if not exists public.events (
+  id          uuid        primary key default gen_random_uuid(),
+  user_id     uuid        references auth.users(id) on delete set null,
+  event_type  text        not null check (event_type in (
+                              'page_view',
+                              'station_tune',
+                              'song_id_request',
+                              'session_heartbeat'
+                          )),
+  station_id  text,
+  metadata    jsonb,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists events_created_at_idx
+  on public.events (created_at desc);
+create index if not exists events_type_time_idx
+  on public.events (event_type, created_at desc);
+create index if not exists events_station_time_idx
+  on public.events (station_id, created_at desc)
+  where station_id is not null;
+
+alter table public.events enable row level security;
+
+drop policy if exists "events_insert_any" on public.events;
+
+-- INSERT-only from the browser. user_id must either be null (best-effort)
+-- or match the caller's auth.uid() so nobody can spoof another user's
+-- activity. No SELECT/UPDATE/DELETE policy exists — only the service-role
+-- key (used from /api/admin/metrics) can read.
+create policy "events_insert_any" on public.events
+  for insert with check (
+    user_id is null or auth.uid() = user_id
+  );

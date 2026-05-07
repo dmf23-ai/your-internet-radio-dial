@@ -20,6 +20,7 @@ import {
 import { getAudioEngine, type AudioStatus } from "@/lib/audio";
 import type { AppUser } from "@/lib/supabase/client";
 import { syncToCloud } from "@/lib/supabase/sync";
+import { trackStationTune } from "@/lib/analytics";
 
 export interface UiState {
   searchOpen: boolean;
@@ -103,7 +104,16 @@ export interface RadioState {
   applyCloudSnapshot: (data: UserData) => void;
 
   setActiveGroup: (id: string) => void;
-  setCurrentStation: (id: string, autoplay?: boolean) => void;
+  // M23: optional `source` parameter classifies the tune for analytics.
+  // 'manual' covers dial / drag / direct programmatic calls (default).
+  // Drawer / preset / URL-restore callers should pass their specific source
+  // so the admin dashboard can filter scan/reconnect noise out of station
+  // popularity rankings.
+  setCurrentStation: (
+    id: string,
+    autoplay?: boolean,
+    source?: "manual" | "preset" | "drawer" | "url",
+  ) => void;
   nextStation: () => void;
   prevStation: () => void;
 
@@ -226,6 +236,10 @@ function startScanInterval(get: () => RadioState) {
       patch.activeGroupId = nextGroup.groupId;
     }
     useRadioStore.setState(patch);
+    // M23 — log scan tunes with source='scan' so the admin dashboard can
+    // filter them out of the popularity rankings (otherwise scan churn
+    // would dominate any "top stations" leaderboard).
+    trackStationTune(next.id, "scan");
     if (s.isOn) void s.play();
   };
   driftOnce();
@@ -436,7 +450,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   // we don't want to drag the user through 2.25s of tuning static for nothing.
   // The exception is during a tune sequence (status === 'tuning'), where the
   // user is mid-drag and we DO need to fall through so the lock-in can fire.
-  setCurrentStation: (id, autoplay = false) => {
+  setCurrentStation: (id, autoplay = false, source = "manual") => {
     const sameId = id === get().currentStationId;
     const status = get().playback.status;
     if (
@@ -456,6 +470,11 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     }
     set({ currentStationId: id });
     schedulePersist(get);
+    // M23 — log the tune. Fires after the no-op early-return above so we
+    // don't pad the log with same-station-already-playing clicks. `source`
+    // distinguishes manual vs. preset/drawer/URL so the dashboard can filter
+    // appropriately.
+    trackStationTune(id, source);
     if (autoplay || get().isOn) void get().play();
   },
 
