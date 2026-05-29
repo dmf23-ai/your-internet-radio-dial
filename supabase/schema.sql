@@ -77,6 +77,27 @@ create index if not exists memberships_user_group_position_idx
   on public.memberships (user_id, group_id, position);
 
 -- ============================================================================
+-- Data API grants (per-user tables)
+--
+-- Supabase announced 2026-04-28 that new tables in `public` will no longer
+-- be granted to the Data API roles automatically. The change applies to all
+-- existing projects on 2026-10-30. Adding explicit grants here so this file
+-- still produces a working schema if the project is ever recreated or opts
+-- in early. RLS remains the real gate — these grants only make the tables
+-- visible to PostgREST. See: https://github.com/orgs/supabase/discussions/45329
+--
+-- Every per-user table needs full CRUD for `authenticated` (anon-signed-in
+-- and permanent users both run as `authenticated`). `anon` covers the brief
+-- window before signInAnonymously completes. `service_role` covers any
+-- future server-side maintenance.
+-- ============================================================================
+
+grant select, insert, update, delete on public.stations      to anon, authenticated, service_role;
+grant select, insert, update, delete on public.groups        to anon, authenticated, service_role;
+grant select, insert, update, delete on public.memberships   to anon, authenticated, service_role;
+grant select, insert, update, delete on public.user_settings to anon, authenticated, service_role;
+
+-- ============================================================================
 -- updated_at trigger
 -- ============================================================================
 
@@ -213,6 +234,11 @@ create table if not exists public.suggestions (
 create index if not exists suggestions_created_at_idx
   on public.suggestions (created_at desc);
 
+-- Data API grants: browser is INSERT-only (RLS enforces); service_role gets
+-- full CRUD so the dashboard / future server code can read & manage.
+grant insert                              on public.suggestions to anon, authenticated;
+grant select, insert, update, delete      on public.suggestions to service_role;
+
 alter table public.suggestions enable row level security;
 
 drop policy if exists "suggestions_insert_any" on public.suggestions;
@@ -250,6 +276,11 @@ create table if not exists public.song_id_cache (
 
 create index if not exists song_id_cache_identified_at_idx
   on public.song_id_cache (identified_at desc);
+
+-- Data API grants: shared community cache. /api/song-id (server) reads with
+-- the anon key (no user JWT → anon role) and writes results back.
+grant select, insert, update              on public.song_id_cache to anon, authenticated;
+grant select, insert, update, delete      on public.song_id_cache to service_role;
 
 alter table public.song_id_cache enable row level security;
 
@@ -303,6 +334,11 @@ create index if not exists events_type_time_idx
 create index if not exists events_station_time_idx
   on public.events (station_id, created_at desc)
   where station_id is not null;
+
+-- Data API grants: browser is INSERT-only (RLS enforces); /api/admin/metrics
+-- reads via service_role.
+grant insert                              on public.events to anon, authenticated;
+grant select, insert, update, delete      on public.events to service_role;
 
 alter table public.events enable row level security;
 
