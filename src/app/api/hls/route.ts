@@ -28,6 +28,74 @@ export const maxDuration = 300;
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
+// --- M24: edge caching ------------------------------------------------------
+// HLS media segments are immutable once published, so repeated fetches of the
+// same ?url= can be served by Vercel's CDN instead of re-invoking this
+// function and re-hitting the station's origin. The CDN cache key is the full
+// request URL (including the query string), so identical upstream resources
+// dedupe correctly across listeners. Only 200s get a TTL — 206/partial and
+// error responses stay no-store (Range requests bypass the CDN cache anyway).
+// Browsers keep max-age=0 and manage their own buffer; s-maxage is stripped
+// before the response reaches them (check x-vercel-cache to see cache state).
+const SEGMENT_CACHE_CONTROL =
+  "public, max-age=0, s-maxage=60, stale-while-revalidate=30";
+// Live manifests change every few seconds; a 1s edge TTL only collapses
+// simultaneous polls from concurrent listeners without risking a stalled
+// player (players re-poll on the order of the segment duration, 2-10s).
+const MANIFEST_CACHE_CONTROL =
+  "public, max-age=0, s-maxage=1, stale-while-revalidate=1";
+
+// --- M24: per-IP rate limiting (in-memory token bucket) ---------------------
+// Best-effort backstop against the recurring /api/hls bot spikes (~26k
+// requests in 35 min from one client). State is per function instance, so a
+// bot spread across instances can exceed the cap — a Vercel WAF rate-limit
+// rule (Firewall tab, available on Hobby) is strictly stronger and runs
+// before the function; this limiter is the zero-provisioning fallback.
+// Ceiling is sized so a real listener never trips it: an active HLS session
+// is ~1-2 req/s steady (edge cache absorbs repeats), so 5/s sustained with a
+// 150-request burst allows several sessions behind one NAT.
+const RATE_LIMIT_BURST = 150;
+const RATE_LIMIT_REFILL_PER_SEC = 5;
+const RATE_LIMIT_RETRY_AFTER_S = 10;
+const RATE_LIMIT_SWEEP_INTERVAL_MS = 60_000;
+
+type Bucket = { tokens: number; last: number };
+const buckets = new Map<string, Bucket>();
+let lastSweep = Date.now();
+
+function clientIp(req: NextRequest): string {
+  // Vercel sets x-forwarded-for; first entry is the client.
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  if (now - lastSweep > RATE_LIMIT_SWEEP_INTERVAL_MS) {
+    lastSweep = now;
+    for (const [key, b] of buckets) {
+      // A bucket that has fully refilled is indistinguishable from a new one.
+      if (((now - b.last) / 1000) * RATE_LIMIT_REFILL_PER_SEC >= RATE_LIMIT_BURST) {
+        buckets.delete(key);
+      }
+    }
+  }
+  let b = buckets.get(ip);
+  if (!b) {
+    b = { tokens: RATE_LIMIT_BURST, last: now };
+    buckets.set(ip, b);
+  }
+  b.tokens = Math.min(
+    RATE_LIMIT_BURST,
+    b.tokens + ((now - b.last) / 1000) * RATE_LIMIT_REFILL_PER_SEC,
+  );
+  b.last = now;
+  if (b.tokens < 1) return true;
+  b.tokens -= 1;
+  return false;
+}
+
 const SEGMENT_PASSTHROUGH_HEADERS = [
   "content-type",
   "content-length",
@@ -70,6 +138,18 @@ function rewriteManifest(body: string, baseUrl: string): string {
 }
 
 export async function GET(req: NextRequest) {
+  const ip = clientIp(req);
+  if (isRateLimited(ip)) {
+    return new NextResponse("rate limit exceeded", {
+      status: 429,
+      headers: {
+        "retry-after": String(RATE_LIMIT_RETRY_AFTER_S),
+        "cache-control": "no-store",
+        "access-control-allow-origin": "*",
+      },
+    });
+  }
+
   const url = req.nextUrl.searchParams.get("url");
   if (!url) {
     return new NextResponse("missing url", { status: 400 });
@@ -132,7 +212,7 @@ export async function GET(req: NextRequest) {
     );
     const headers = new Headers();
     headers.set("content-type", "application/vnd.apple.mpegurl");
-    headers.set("cache-control", "no-cache, no-store");
+    headers.set("cache-control", MANIFEST_CACHE_CONTROL);
     headers.set("access-control-allow-origin", "*");
     return new NextResponse(rewritten, { status: 200, headers });
   }
@@ -149,7 +229,12 @@ export async function GET(req: NextRequest) {
     const v = upstream.headers.get(h);
     if (v) headers.set(h, v);
   }
-  headers.set("cache-control", "no-cache, no-store");
+  // Only full 200 responses are safe to cache; 206/partial responses interact
+  // badly with caching and stay uncached.
+  headers.set(
+    "cache-control",
+    upstream.status === 200 ? SEGMENT_CACHE_CONTROL : "no-store",
+  );
   headers.set("access-control-allow-origin", "*");
 
   return new NextResponse(upstream.body, {
