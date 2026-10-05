@@ -50,7 +50,15 @@ async function runCloudStep(
     } else {
       console.warn("[sync] cloud pull failed; keeping this device's library");
     }
+  }
 
+  // Lineup markers, and the move onto the current default lineup for a
+  // library that was never customized. After the pull (which can replace the
+  // library) and before settling, so useStationURL commits against the final
+  // library and the update reaches the cloud with the settle.
+  store().reconcileLineup();
+
+  if (userId) {
     // Idempotent data repair: any seed-default band that exists in the
     // user's library but has zero memberships gets its seed memberships
     // restored. Runs after the pull so it sees the truly active state. No-op

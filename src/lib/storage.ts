@@ -15,21 +15,32 @@ export interface UserData {
   // (transparent EQ). Only persisted to IndexedDB; not mirrored to cloud yet.
   bass?: number; // dB, ±12
   treble?: number; // dB, ±12
+  // Lineup markers (see src/lib/lineup.ts). Absent on saves from clients
+  // that predate them; the startup reconcile then infers both.
+  // seedVersion: the default-lineup version this library reflects.
+  // customizedAt: ISO time of the last library edit; null = never.
+  seedVersion?: number | null;
+  customizedAt?: string | null;
+  // CURRENT_VERSION of the client that saved this.
   version: number;
 }
 
 const KEY = "yird:userData:v1";
-export const CURRENT_VERSION = 12;
+
+// The default-lineup version: bump it whenever seed.ts's lineup changes
+// (and record the new stations in src/data/seedHistory.ts). Users who never
+// customized their library are moved onto the new lineup on their next
+// visit; customizers are offered the new stations in the search overlay.
+// Until v13 a mismatch discarded the saved library, and the cloud pull then
+// put the old one straight back, so new defaults never reached returning
+// users.
+export const CURRENT_VERSION = 13;
 
 export async function loadUserData(): Promise<UserData | null> {
   if (typeof window === "undefined") return null;
   try {
     const v = await get<UserData>(KEY);
-    if (!v) return null;
-    // Bumped version → discard old data and re-seed. Prevents stale station
-    // lists from sticking around after seed changes.
-    if (v.version !== CURRENT_VERSION) return null;
-    return v;
+    return v ?? null;
   } catch {
     return null;
   }

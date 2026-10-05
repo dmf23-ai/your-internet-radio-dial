@@ -75,13 +75,23 @@ function membershipToRow(m: Membership) {
   };
 }
 
-function settingsToRow(data: UserData) {
-  return {
+function settingsToRow(data: UserData): Record<string, unknown> {
+  const row: Record<string, unknown> = {
     active_group_id: data.activeGroupId,
     current_station_id: data.currentStationId,
     volume: data.volume,
   };
+  // Lineup markers, once resolved. Left out before that, so the cloud's copy
+  // is kept rather than blanked (replace_user_library and the upsert both
+  // leave absent columns alone).
+  if (typeof data.seedVersion === "number") {
+    row.seed_version = data.seedVersion;
+    row.customized_at = data.customizedAt ?? null;
+  }
+  return row;
 }
+
+const MARKER_COLUMNS = ["seed_version", "customized_at"];
 
 // ---------- snake_case → camelCase mappers (pull path) ----------
 
@@ -116,6 +126,10 @@ interface SettingsRow {
   active_group_id: string | null;
   current_station_id: string | null;
   volume: number;
+  // Absent until the schema has the columns; null when written by a client
+  // that predates the markers.
+  seed_version?: number | null;
+  customized_at?: string | null;
 }
 
 function rowToStation(r: StationRow): Station {
@@ -370,10 +384,18 @@ async function writeLibraryInSteps(
     if (insMemberships) throw insMemberships;
   }
 
-  // 5. Upsert singleton user_settings.
-  const { error: upsSettings } = await sb
-    .from("user_settings")
-    .upsert({ user_id: userId, ...settingsToRow(data) });
+  // 5. Upsert singleton user_settings. PGRST204 = the database doesn't have
+  //    the marker columns yet; the library itself is what matters, so retry
+  //    without them.
+  const settings: Record<string, unknown> = {
+    user_id: userId,
+    ...settingsToRow(data),
+  };
+  let { error: upsSettings } = await sb.from("user_settings").upsert(settings);
+  if (upsSettings?.code === "PGRST204") {
+    for (const col of MARKER_COLUMNS) delete settings[col];
+    ({ error: upsSettings } = await sb.from("user_settings").upsert(settings));
+  }
   if (upsSettings) throw upsSettings;
 }
 
@@ -459,6 +481,12 @@ export async function pullFromCloud(userId: string): Promise<PullResult> {
         activeGroupId: settings?.active_group_id ?? null,
         currentStationId: settings?.current_station_id ?? null,
         volume: typeof settings?.volume === "number" ? settings.volume : 0.7,
+        // null seed_version = no markers yet; the reconcile infers them.
+        seedVersion:
+          typeof settings?.seed_version === "number"
+            ? settings.seed_version
+            : null,
+        customizedAt: settings?.customized_at ?? null,
         version: CURRENT_VERSION,
       },
     };

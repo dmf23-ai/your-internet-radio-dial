@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useRadioStore } from "@/lib/store";
+import { newDefaultStations, type BandPlacement } from "@/lib/lineup";
 import type { Station, StreamType } from "@/data/seed";
 
 /**
@@ -15,6 +16,10 @@ import type { Station, StreamType } from "@/data/seed";
  *    infers streamType from extension, and inserts with corsOk:false so it
  *    routes through the /api/stream or /api/hls proxy (always works
  *    same-origin, slight latency cost).
+ *
+ * Above both, for users who customized their library: a button that adds
+ * the default stations added since their lineup (users who never customized
+ * get new lineups automatically; see src/lib/lineup.ts).
  *
  * ESC or backdrop click closes.
  */
@@ -87,6 +92,11 @@ function inferStreamTypeFromUrl(rawUrl: string): StreamType {
 
 type AddMode = "search" | "url";
 
+type DefaultsAdded = { added: number; bands: BandPlacement[] };
+
+// How long the "Added N stations" confirmation stays up.
+const DEFAULTS_ADDED_MS = 8000;
+
 export default function SearchOverlay() {
   const searchOpen = useRadioStore((s) => s.ui.searchOpen);
   const setSearchOpen = useRadioStore((s) => s.setSearchOpen);
@@ -109,6 +119,25 @@ export default function SearchOverlay() {
         s.stations.filter((st) => ids.has(st.id)).map((st) => st.streamUrl),
       );
     }),
+  );
+
+  // New default stations on offer: only for customized libraries, and only
+  // once the startup cloud step has settled (the pull can replace the
+  // library, and the reconcile resolves its markers).
+  const cloudSettled = useRadioStore((s) => s.cloudSettled);
+  const customizedAt = useRadioStore((s) => s.customizedAt);
+  const seedVersion = useRadioStore((s) => s.seedVersion);
+  const libraryStations = useRadioStore((s) => s.stations);
+  const addNewDefaultStations = useRadioStore((s) => s.addNewDefaultStations);
+  const newDefaultsCount = useMemo(
+    () =>
+      cloudSettled && customizedAt !== null && seedVersion !== null
+        ? newDefaultStations(libraryStations, seedVersion).length
+        : 0,
+    [cloudSettled, customizedAt, seedVersion, libraryStations],
+  );
+  const [defaultsAdded, setDefaultsAdded] = useState<DefaultsAdded | null>(
+    null,
   );
 
   const [mode, setMode] = useState<AddMode>("search");
@@ -141,10 +170,23 @@ export default function SearchOverlay() {
     setNameInput("");
     setUrlError(null);
     setUrlJustAdded(null);
+    setDefaultsAdded(null);
     // Next frame — ensures the input is mounted before we focus it.
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
   }, [searchOpen]);
+
+  // The confirmation is brief.
+  useEffect(() => {
+    if (!defaultsAdded) return;
+    const timer = setTimeout(() => setDefaultsAdded(null), DEFAULTS_ADDED_MS);
+    return () => clearTimeout(timer);
+  }, [defaultsAdded]);
+
+  function handleAddDefaults() {
+    const result = addNewDefaultStations();
+    if (result) setDefaultsAdded(result);
+  }
 
   // Refocus when switching modes so the user lands in the right field.
   useEffect(() => {
@@ -355,6 +397,14 @@ export default function SearchOverlay() {
             </button>
           </div>
 
+          {(newDefaultsCount > 0 || defaultsAdded) && (
+            <NewDefaultsCallout
+              count={newDefaultsCount}
+              added={defaultsAdded}
+              onAdd={handleAddDefaults}
+            />
+          )}
+
           {/* Mode switcher (segmented brass control) */}
           <div className="px-4 pb-1">
             <div
@@ -438,6 +488,70 @@ export default function SearchOverlay() {
             />
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// --- New default stations (customized libraries only) ---
+
+function NewDefaultsCallout({
+  count,
+  added,
+  onAdd,
+}: {
+  count: number;
+  added: DefaultsAdded | null;
+  onAdd: () => void;
+}) {
+  if (added) {
+    const where = added.bands.map((b) => `${b.name} +${b.count}`).join(", ");
+    return (
+      <div className="px-4 pb-3">
+        <p
+          role="status"
+          className="text-xs leading-relaxed px-3 py-2 rounded-md"
+          style={{
+            background: "rgba(35,55,25,0.45)",
+            border: "1px solid rgba(140,180,90,0.3)",
+            color: "#cfe6a8",
+          }}
+        >
+          Added {added.added} station{added.added === 1 ? "" : "s"} from the
+          default lineup: <span className="text-brass-300">{where}</span>.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="px-4 pb-3">
+      <div
+        className="rounded-md px-3 py-2.5 flex flex-col gap-2"
+        style={{
+          background: "rgba(180,138,73,0.08)",
+          border: "1px solid rgba(212,175,116,0.25)",
+        }}
+      >
+        <button
+          type="button"
+          onClick={onAdd}
+          className="self-start text-left font-display uppercase tracking-[0.2em] text-[11px] leading-snug rounded-md px-3 py-2 transition-transform active:translate-y-[1px]"
+          style={{
+            color: "#1a120a",
+            background:
+              "radial-gradient(circle at 30% 20%, #f0d9a8 0%, #b48a49 70%, #8a6a32 100%)",
+            border: "1px solid rgba(0,0,0,0.7)",
+            boxShadow:
+              "inset 0 1px 2px rgba(255,240,200,0.6), 0 2px 3px rgba(0,0,0,0.5)",
+          }}
+        >
+          Add {count} new station{count === 1 ? "" : "s"} from the default
+          lineup
+        </button>
+        <p className="text-[11px] leading-snug text-ivory-soft/60">
+          Added to the default lineup since your dial was set up. Each goes
+          into its usual band, or New Arrivals if that band is gone.
+        </p>
       </div>
     </div>
   );

@@ -21,6 +21,13 @@ import { getAudioEngine, type AudioStatus } from "@/lib/audio";
 import type { AppUser } from "@/lib/supabase/client";
 import { syncToCloud } from "@/lib/supabase/sync";
 import { trackStationTune } from "@/lib/analytics";
+import {
+  currentDefaultLineup,
+  newDefaultStations,
+  placeDefaultStations,
+  resolveLineupMarkers,
+  type BandPlacement,
+} from "@/lib/lineup";
 
 export interface UiState {
   searchOpen: boolean;
@@ -59,6 +66,13 @@ export interface RadioState {
   stations: Station[];
   groups: Group[];
   memberships: Membership[];
+
+  // Lineup markers (see src/lib/lineup.ts). seedVersion: the default-lineup
+  // version the library reflects; null only between loading a library saved
+  // before the markers existed and reconcileLineup resolving it.
+  // customizedAt: ISO time of the last library edit; null = never.
+  seedVersion: number | null;
+  customizedAt: string | null;
 
   // selection
   activeGroupId: string | null;
@@ -114,8 +128,9 @@ export interface RadioState {
    * Flips `cloudSettled` on and releases the cloud leg of persistence:
    * changes persisted while it was held back are synced now. `push` forces
    * that sync even with nothing pending (first-visit seeding of an empty
-   * cloud). Called by StoreHydrator when a cloud step finishes. Resolves
-   * when that sync is done (immediately if there was nothing to sync).
+   * cloud) and saves the library to IndexedDB too. Called by StoreHydrator
+   * when a cloud step finishes. Resolves when that sync is done
+   * (immediately if there was nothing to sync).
    */
   markCloudSettled: (opts?: { push?: boolean }) => Promise<void>;
   /**
@@ -123,6 +138,20 @@ export interface RadioState {
    * on) while StoreHydrator pulls a newly signed-in account's library.
    */
   markCloudUnsettled: () => void;
+  /**
+   * Brings the library's lineup markers up to date and moves a library that
+   * was never customized onto the current default lineup (keeping the tuned
+   * station, band, volume and EQ). Called by StoreHydrator after the cloud
+   * step, before it settles.
+   */
+  reconcileLineup: () => void;
+  /**
+   * The search overlay's button: adds every default station newer than the
+   * user's lineup that they don't have yet, each into its default band (or
+   * "New Arrivals"), and marks the library current. Returns where they went,
+   * or null when there was nothing to add.
+   */
+  addNewDefaultStations: () => { added: number; bands: BandPlacement[] } | null;
 
   setActiveGroup: (id: string) => void;
   // M23: optional `source` parameter classifies the tune for analytics.
@@ -211,8 +240,27 @@ function toUserData(s: RadioState): UserData {
     volume: s.volume,
     bass: s.bass,
     treble: s.treble,
+    seedVersion: s.seedVersion,
+    customizedAt: s.customizedAt,
     version: CURRENT_VERSION,
   };
+}
+
+// Patch for library edits (stations added, removed or reordered; bands
+// created, renamed, deleted or reordered): the user has customized their
+// library, so new lineups are offered rather than applied. Tuning, volume,
+// EQ, band choice and scan don't count.
+function customized(): Pick<RadioState, "customizedAt"> {
+  return { customizedAt: new Date().toISOString() };
+}
+
+let groupSeq = 0;
+// Same id shape as createGroup's ("g-<time>-<random>").
+function newGroupId(): string {
+  groupSeq += 1;
+  return `g-${(Date.now() + groupSeq).toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 6)}`;
 }
 
 function schedulePersist(get: () => RadioState) {
@@ -315,6 +363,10 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   groups: seedGroups,
   memberships: seedMemberships,
 
+  // A first visit starts on the current lineup, untouched.
+  seedVersion: CURRENT_VERSION,
+  customizedAt: null,
+
   activeGroupId: seedDefaults.activeGroupId,
   currentStationId: seedDefaults.currentStationId,
   volume: seedDefaults.volume,
@@ -364,6 +416,11 @@ export const useRadioStore = create<RadioState>((set, get) => ({
             : seedDefaults.volume,
         bass: typeof saved.bass === "number" ? saved.bass : 0,
         treble: typeof saved.treble === "number" ? saved.treble : 0,
+        // A save without markers predates them: reconcileLineup infers both.
+        seedVersion:
+          typeof saved.seedVersion === "number" ? saved.seedVersion : null,
+        customizedAt:
+          typeof saved.customizedAt === "string" ? saved.customizedAt : null,
       });
     }
     // subscribe the store to audio engine status updates
@@ -465,6 +522,10 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       activeGroupId: data.activeGroupId,
       currentStationId: data.currentStationId,
       volume: data.volume,
+      seedVersion:
+        typeof data.seedVersion === "number" ? data.seedVersion : null,
+      customizedAt:
+        typeof data.customizedAt === "string" ? data.customizedAt : null,
     });
     // Keep the audio engine's volume in sync with the pulled value.
     getAudioEngine().setVolume(data.volume);
@@ -480,10 +541,68 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     if (!cloudPending && !opts?.push) return Promise.resolve();
     cloudPending = false;
     const s = get();
+    // Seeding: the device may never have saved this library either.
+    if (opts?.push) void saveUserData(toUserData(s));
     return s.user ? syncToCloud(s.user.id, toUserData(s)) : Promise.resolve();
   },
 
   markCloudUnsettled: () => set({ cloudSettled: false }),
+
+  reconcileLineup: () => {
+    const s = get();
+    const markers = resolveLineupMarkers(
+      s,
+      { seedVersion: s.seedVersion, customizedAt: s.customizedAt },
+      new Date().toISOString(),
+    );
+    if (
+      markers.customizedAt === null &&
+      markers.seedVersion < CURRENT_VERSION
+    ) {
+      // Never customized: replace stations, bands and memberships with the
+      // current lineup. Volume and EQ aren't part of it, so they stay.
+      const next = currentDefaultLineup(s);
+      const retuned = next.currentStationId !== s.currentStationId;
+      set({ ...next, seedVersion: CURRENT_VERSION, customizedAt: null });
+      schedulePersist(get);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[lineup] moved an untouched v${markers.seedVersion} library onto the v${CURRENT_VERSION} default lineup`,
+      );
+      if (retuned && get().isOn) void get().play();
+      return;
+    }
+    if (
+      markers.seedVersion === s.seedVersion &&
+      markers.customizedAt === s.customizedAt
+    ) {
+      return;
+    }
+    set(markers);
+    schedulePersist(get);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[lineup] library is v${markers.seedVersion}, ${
+        markers.customizedAt ? "customized" : "untouched"
+      }`,
+    );
+  },
+
+  addNewDefaultStations: () => {
+    const s = get();
+    if (s.seedVersion === null) return null;
+    const offer = newDefaultStations(s.stations, s.seedVersion);
+    if (offer.length === 0) return null;
+    const placed = placeDefaultStations(s, offer, s.seedVersion, newGroupId);
+    set({
+      stations: placed.stations,
+      groups: placed.groups,
+      memberships: placed.memberships,
+      seedVersion: CURRENT_VERSION,
+    });
+    schedulePersist(get);
+    return { added: offer.length, bands: placed.placements };
+  },
 
   setActiveGroup: (id) => {
     if (get().activeGroupId === id) return;
@@ -670,7 +789,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       ...groups,
       { id, name: trimmed, position: groups.length },
     ];
-    set({ groups: nextGroups });
+    set({ groups: nextGroups, ...customized() });
     schedulePersist(get);
     return id;
   },
@@ -678,16 +797,19 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   renameGroup: (id, name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
+    const current = get().groups.find((g) => g.id === id);
+    if (!current || current.name === trimmed) return;
     const nextGroups = get().groups.map((g) =>
       g.id === id ? { ...g, name: trimmed } : g,
     );
-    set({ groups: nextGroups });
+    set({ groups: nextGroups, ...customized() });
     schedulePersist(get);
   },
 
   deleteGroup: (id) => {
     const { groups, memberships, activeGroupId } = get();
     if (groups.length <= 1) return; // Always keep at least one group.
+    if (!groups.some((g) => g.id === id)) return;
     const remaining = groups
       .filter((g) => g.id !== id)
       // Renumber positions so the sequence stays dense.
@@ -711,6 +833,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       memberships: nextMemberships,
       activeGroupId: nextActive,
       currentStationId: nextCurrentId,
+      ...customized(),
     });
     schedulePersist(get);
   },
@@ -723,7 +846,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     if (swapIdx < 0 || swapIdx >= sorted.length) return;
     [sorted[idx], sorted[swapIdx]] = [sorted[swapIdx], sorted[idx]];
     const nextGroups: Group[] = sorted.map((g, i) => ({ ...g, position: i }));
-    set({ groups: nextGroups });
+    set({ groups: nextGroups, ...customized() });
     schedulePersist(get);
   },
 
@@ -741,7 +864,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       ...get().memberships.filter((m) => m.groupId !== groupId),
       ...renumbered,
     ];
-    set({ memberships: nextMemberships });
+    set({ memberships: nextMemberships, ...customized() });
     schedulePersist(get);
   },
 
@@ -760,7 +883,7 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       ...memberships.filter((m) => m.groupId !== groupId),
       ...groupRemainder,
     ];
-    set({ memberships: nextMemberships });
+    set({ memberships: nextMemberships, ...customized() });
 
     // If we just removed the currently-playing station from the active group,
     // tune to the next station that still exists in the active group (or
@@ -800,7 +923,11 @@ export const useRadioStore = create<RadioState>((set, get) => ({
         position: groupCount,
       },
     ];
-    set({ stations: nextStations, memberships: nextMemberships });
+    set({
+      stations: nextStations,
+      memberships: nextMemberships,
+      ...customized(),
+    });
     schedulePersist(get);
     return true;
   },

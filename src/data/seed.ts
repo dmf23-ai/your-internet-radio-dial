@@ -4,7 +4,10 @@
 // This seed is the curator's (David's) personal library, exported from a live
 // IndexedDB snapshot and used as the default for new users. Orphan stations
 // (added but not assigned to any band) are filtered out at export time.
-// To refresh, see the "Update stations" feedback memory.
+// To refresh, see the "Update stations" feedback memory. Any lineup change
+// also needs a CURRENT_VERSION bump and the new station ids recorded in
+// src/data/seedHistory.ts (it lives outside this file so a refresh can't
+// overwrite it).
 
 export type StreamType = "mp3" | "aac" | "hls" | "ogg" | "unknown";
 
@@ -1150,6 +1153,20 @@ export const seedStations: Station[] = [
     isPreset: true,
     corsOk: false,
   },
+  // From David's library (dmf23), stream-tested 2026-10-05.
+  {
+    id: "rb-a5613717-c60b-4952-bb9c-a79d2063c96f",
+    name: "CHIRP Radio (WCXP-LP)",
+    streamUrl: "https://peridot.streamguys1.com:5185/live",
+    streamType: "mp3",
+    homepage: "https://chirpradio.org/",
+    logoUrl: "https://chirpradio.org/assets/assets/apple-touch-icon-180x180.png",
+    country: "The United States Of America",
+    bitrate: 128,
+    tags: ["independent radio", "indie rock", "low-power"],
+    isPreset: true,
+    corsOk: false,
+  },
 ];
 
 // --- memberships (station -> band order) ---
@@ -1255,6 +1272,7 @@ export const seedMemberships: Membership[] = [
   { stationId: "url-wdbx-carbondale", groupId: "g-exploratorium", position: 22 },
   { stationId: "rb-ba149f9e-2a82-4727-aac7-390667fa88a5", groupId: "g-exploratorium", position: 23 },
   { stationId: "rb-360bb528-cea3-4e8e-84c6-3970c55bda71", groupId: "g-exploratorium", position: 24 },
+  { stationId: "rb-a5613717-c60b-4952-bb9c-a79d2063c96f", groupId: "g-exploratorium", position: 25 },
 ];
 
 export const seedDefaults = {
