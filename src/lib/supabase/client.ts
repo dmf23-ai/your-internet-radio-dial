@@ -20,6 +20,7 @@
 
 import {
   createClient,
+  type AuthChangeEvent,
   type Session,
   type SupabaseClient,
   type User,
@@ -207,6 +208,8 @@ export async function signOut(): Promise<void> {
 
 /**
  * Subscribe to auth state changes. Fires when:
+ *   - the client has loaded the stored session (INITIAL_SESSION, once per
+ *     subscription, with or without a user)
  *   - a new session is established (sign-in, sign-up, anon sign-in)
  *   - the session ends (sign-out)
  *   - the user's record is updated (email confirmation → anon becomes permanent)
@@ -214,13 +217,13 @@ export async function signOut(): Promise<void> {
  * Returns an unsubscribe function.
  */
 export function subscribeToAuthChanges(
-  cb: (user: AppUser | null) => void,
+  cb: (user: AppUser | null, event: AuthChangeEvent) => void,
 ): () => void {
   const sb = getSupabase();
   if (!sb) return () => {};
-  const { data } = sb.auth.onAuthStateChange((_event, session) => {
-    if (session?.user) cb(userToAppUser(session.user));
-    else cb(null);
+  const { data } = sb.auth.onAuthStateChange((event, session) => {
+    if (session?.user) cb(userToAppUser(session.user), event);
+    else cb(null, event);
   });
   return () => data.subscription.unsubscribe();
 }

@@ -45,7 +45,9 @@ export interface RadioState {
   // True once StoreHydrator's startup cloud step is over — snapshot applied,
   // local seed pushed up, or no session to sync with. Until then the pull can
   // still overwrite currentStationId/activeGroupId, so startup selection that
-  // must win over it (useStationURL's ?station= cue) waits for this.
+  // must win over it (useStationURL's ?station= cue) waits for this. Cloud
+  // syncs wait for it too (see schedulePersist). Goes false again while a
+  // newly signed-in account's library is pulled.
   cloudSettled: boolean;
 
   // auth — null until ensureAnonSession() resolves. Anonymous users get a
@@ -105,11 +107,22 @@ export interface RadioState {
    * Replace the local data slices with a cloud snapshot and persist to
    * IndexedDB (skipping the cloud-sync leg — we just read this state from
    * cloud, no point writing it back). Called by StoreHydrator on startup
-   * when the user has cloud data.
+   * and after a sign-in when the user has cloud data.
    */
   applyCloudSnapshot: (data: UserData) => void;
-  /** Flips `cloudSettled`. Called once by StoreHydrator at the end of startup. */
-  markCloudSettled: () => void;
+  /**
+   * Flips `cloudSettled` on and releases the cloud leg of persistence:
+   * changes persisted while it was held back are synced now. `push` forces
+   * that sync even with nothing pending (first-visit seeding of an empty
+   * cloud). Called by StoreHydrator when a cloud step finishes. Resolves
+   * when that sync is done (immediately if there was nothing to sync).
+   */
+  markCloudSettled: (opts?: { push?: boolean }) => Promise<void>;
+  /**
+   * Holds the cloud leg of persistence back again (IndexedDB writes carry
+   * on) while StoreHydrator pulls a newly signed-in account's library.
+   */
+  markCloudUnsettled: () => void;
 
   setActiveGroup: (id: string) => void;
   // M23: optional `source` parameter classifies the tune for analytics.
@@ -179,24 +192,41 @@ export interface RadioState {
 // Writes to IndexedDB (always) and Supabase (when user is signed in). Both
 // go through the same 400ms debounce so rapid mutations coalesce into one
 // persist pass.
+//
+// The cloud leg waits for `cloudSettled`: until StoreHydrator's cloud step
+// is over, a sync could race the pull (which could then read the library
+// mid-replace) or push a library the pull is about to replace. Persists in
+// that window still reach IndexedDB; they just leave `cloudPending` set, and
+// markCloudSettled syncs the then-current state once.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let cloudPending = false;
+
+function toUserData(s: RadioState): UserData {
+  return {
+    stations: s.stations,
+    groups: s.groups,
+    memberships: s.memberships,
+    activeGroupId: s.activeGroupId,
+    currentStationId: s.currentStationId,
+    volume: s.volume,
+    bass: s.bass,
+    treble: s.treble,
+    version: CURRENT_VERSION,
+  };
+}
+
 function schedulePersist(get: () => RadioState) {
   if (typeof window === "undefined") return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    saveTimer = null;
     const s = get();
-    const data: UserData = {
-      stations: s.stations,
-      groups: s.groups,
-      memberships: s.memberships,
-      activeGroupId: s.activeGroupId,
-      currentStationId: s.currentStationId,
-      volume: s.volume,
-      bass: s.bass,
-      treble: s.treble,
-      version: CURRENT_VERSION,
-    };
-    saveUserData(data);
+    const data = toUserData(s);
+    void saveUserData(data);
+    if (!s.cloudSettled) {
+      cloudPending = true;
+      return;
+    }
     // Fire-and-forget cloud mirror. No-op when user is null (pre-auth) or
     // Supabase is misconfigured. Errors are logged inside syncToCloud.
     // Tone settings (bass/treble) live only in IndexedDB right now — the
@@ -421,6 +451,13 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   setUser: (u) => set({ user: u }),
 
   applyCloudSnapshot: (data) => {
+    // The snapshot supersedes anything persisted before it arrived (cloud
+    // wins), so drop the pending persist rather than echo the snapshot back.
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    cloudPending = false;
     set({
       stations: data.stations,
       groups: data.groups,
@@ -432,11 +469,21 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     // Keep the audio engine's volume in sync with the pulled value.
     getAudioEngine().setVolume(data.volume);
     // Persist to IndexedDB directly. Bypasses schedulePersist on purpose —
-    // we just read this state from cloud, no need to push it back.
-    void saveUserData(data);
+    // we just read this state from cloud, no need to push it back. Saved
+    // from the store rather than `data` so the device-only tone settings
+    // (not in the cloud payload) survive.
+    void saveUserData(toUserData(get()));
   },
 
-  markCloudSettled: () => set({ cloudSettled: true }),
+  markCloudSettled: (opts) => {
+    set({ cloudSettled: true });
+    if (!cloudPending && !opts?.push) return Promise.resolve();
+    cloudPending = false;
+    const s = get();
+    return s.user ? syncToCloud(s.user.id, toUserData(s)) : Promise.resolve();
+  },
+
+  markCloudUnsettled: () => set({ cloudSettled: false }),
 
   setActiveGroup: (id) => {
     if (get().activeGroupId === id) return;

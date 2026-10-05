@@ -201,6 +201,122 @@ create policy "user_settings_delete_own" on public.user_settings
   for delete using (auth.uid() = user_id);
 
 -- ============================================================================
+-- Lineup markers + atomic library sync (2026-10-05)
+--
+-- customized_at: when the user last edited their library (added, removed or
+-- reordered stations; created, renamed, deleted or reordered bands). NULL =
+-- never customized: the client moves those users onto each new default
+-- lineup automatically.
+-- seed_version: the default-lineup version (CURRENT_VERSION in
+-- src/lib/storage.ts) the library reflects. NULL = last written by a client
+-- that predates these markers; the client then infers both markers from
+-- the library itself.
+-- ============================================================================
+
+alter table public.user_settings
+  add column if not exists customized_at timestamptz,
+  add column if not exists seed_version  integer;
+
+-- replace_user_library: replaces the caller's stations, groups and
+-- memberships and upserts their user_settings in ONE transaction. The
+-- client's sync (src/lib/supabase/sync.ts) used to be seven sequential
+-- requests (delete everything, then insert everything); a pull overlapping
+-- them could read an empty library. Readers now see the old library or the
+-- new one, never a mix, and a failed write leaves the old one intact.
+--
+-- SECURITY INVOKER: runs as the caller, so the RLS policies above still
+-- apply, and rows are written for auth.uid() only. p_user_id must equal
+-- auth.uid(), so a payload queued for one account can't land in another if
+-- the session switched before it was sent.
+--
+-- p_settings keys: active_group_id, current_station_id, volume, plus the
+-- optional lineup markers customized_at / seed_version. An absent marker key
+-- keeps the stored value (clients that predate the markers don't send them);
+-- a key present with null sets NULL.
+create or replace function public.replace_user_library(
+  p_user_id     uuid,
+  p_stations    jsonb,
+  p_groups      jsonb,
+  p_memberships jsonb,
+  p_settings    jsonb
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    raise exception 'replace_user_library: not authenticated'
+      using errcode = '42501';
+  end if;
+  if p_user_id is distinct from v_uid then
+    raise exception 'replace_user_library: p_user_id does not match the session'
+      using errcode = '42501';
+  end if;
+
+  delete from public.memberships where user_id = v_uid;
+  delete from public.stations    where user_id = v_uid;
+  delete from public.groups      where user_id = v_uid;
+
+  insert into public.stations
+    (user_id, id, name, stream_url, stream_type, homepage, logo_url,
+     country, language, bitrate, tags, is_preset, cors_ok)
+  select v_uid, s.id, s.name, s.stream_url, s.stream_type, s.homepage,
+         s.logo_url, s.country, s.language, round(s.bitrate)::int, s.tags,
+         coalesce(s.is_preset, false), s.cors_ok
+  from jsonb_to_recordset(coalesce(p_stations, '[]'::jsonb)) as s(
+    id text, name text, stream_url text, stream_type text, homepage text,
+    logo_url text, country text, language text, bitrate numeric,
+    tags text[], is_preset boolean, cors_ok boolean
+  );
+
+  insert into public.groups (user_id, id, name, position)
+  select v_uid, g.id, g.name, g.position
+  from jsonb_to_recordset(coalesce(p_groups, '[]'::jsonb))
+    as g(id text, name text, position int);
+
+  insert into public.memberships (user_id, station_id, group_id, position)
+  select v_uid, m.station_id, m.group_id, m.position
+  from jsonb_to_recordset(coalesce(p_memberships, '[]'::jsonb))
+    as m(station_id text, group_id text, position int);
+
+  insert into public.user_settings as us
+    (user_id, active_group_id, current_station_id, volume,
+     customized_at, seed_version)
+  values (
+    v_uid,
+    p_settings ->> 'active_group_id',
+    p_settings ->> 'current_station_id',
+    coalesce((p_settings ->> 'volume')::real, 0.7),
+    (p_settings ->> 'customized_at')::timestamptz,
+    (p_settings ->> 'seed_version')::integer
+  )
+  on conflict (user_id) do update set
+    active_group_id    = excluded.active_group_id,
+    current_station_id = excluded.current_station_id,
+    volume             = excluded.volume,
+    customized_at      = case when p_settings ? 'customized_at'
+                              then excluded.customized_at
+                              else us.customized_at end,
+    seed_version       = case when p_settings ? 'seed_version'
+                              then excluded.seed_version
+                              else us.seed_version end;
+end;
+$$;
+
+-- Data API grants: callable by signed-in users (anonymous sign-ins
+-- included; both run as `authenticated`). Revoked from PUBLIC and `anon`:
+-- without a session there's no auth.uid() to write for.
+revoke all on function public.replace_user_library(uuid, jsonb, jsonb, jsonb, jsonb) from public, anon;
+grant execute on function public.replace_user_library(uuid, jsonb, jsonb, jsonb, jsonb) to authenticated;
+
+-- Have PostgREST pick up the new columns and function right away.
+notify pgrst, 'reload schema';
+
+-- ============================================================================
 -- Suggestions (M12.5)
 --
 -- A write-only inbox for user feedback: station nominations for the default

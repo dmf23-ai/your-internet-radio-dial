@@ -6,9 +6,70 @@ import {
   ensureAnonSession,
   subscribeToAuthChanges,
 } from "@/lib/supabase/client";
-import { pullFromCloud, syncToCloud } from "@/lib/supabase/sync";
-import { CURRENT_VERSION } from "@/lib/storage";
+import { pullFromCloud } from "@/lib/supabase/sync";
 import { trackPageView, trackSessionHeartbeat } from "@/lib/analytics";
+
+/**
+ * One cloud step: pull the account's library (cloud wins), repair it, then
+ * settle, which releases the store's held-back cloud syncs. Runs at startup
+ * and again whenever a sign-in switches the uid. `isCurrent` turns false
+ * once a newer step (or an unmount) takes over; a stale step stops without
+ * touching the store, so an overtaken pull can't land on top of a newer
+ * account's library.
+ *
+ * userId null = local-only mode (Supabase unconfigured or sign-in failed):
+ * no snapshot is coming, so the local library is final as soon as it's here.
+ */
+async function runCloudStep(
+  userId: string | null,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const store = useRadioStore.getState;
+  let pushLocal = false;
+
+  if (userId) {
+    // Pull-or-seed: if the user has cloud data, pull it into the store
+    // (cloud wins); if the cloud is empty, push the local library up as the
+    // initial snapshot once settled. A failed pull keeps the local library
+    // and pushes nothing — the cloud may hold a library we just couldn't
+    // read.
+    const pulled = await pullFromCloud(userId);
+    if (!isCurrent()) return;
+    if (pulled.status === "ok") {
+      store().applyCloudSnapshot(pulled.data);
+      // eslint-disable-next-line no-console
+      console.log(
+        "[sync] pulled cloud snapshot:",
+        pulled.data.stations.length,
+        "stations,",
+        pulled.data.groups.length,
+        "groups",
+      );
+    } else if (pulled.status === "empty") {
+      pushLocal = true;
+    } else {
+      console.warn("[sync] cloud pull failed; keeping this device's library");
+    }
+
+    // Idempotent data repair: any seed-default band that exists in the
+    // user's library but has zero memberships gets its seed memberships
+    // restored. Runs after the pull so it sees the truly active state. No-op
+    // when every default band still has at least one station.
+    await store().restoreEmptySeedBands();
+    if (!isCurrent()) return;
+  }
+
+  // The pull can no longer overwrite the selection, so useStationURL may
+  // commit a ?station= cue now, and the cloud may hear about everything
+  // persisted while we waited.
+  const synced = store().markCloudSettled({ push: pushLocal });
+  if (pushLocal) {
+    void synced.then(() => {
+      // eslint-disable-next-line no-console
+      console.log("[sync] initial cloud seed complete");
+    });
+  }
+}
 
 export default function StoreHydrator({
   children,
@@ -17,14 +78,16 @@ export default function StoreHydrator({
 }) {
   const hydrate = useRadioStore((s) => s.hydrate);
   const setUser = useRadioStore((s) => s.setUser);
-  const applyCloudSnapshot = useRadioStore((s) => s.applyCloudSnapshot);
-  const restoreEmptySeedBands = useRadioStore((s) => s.restoreEmptySeedBands);
-  const markCloudSettled = useRadioStore((s) => s.markCloudSettled);
+  const markCloudUnsettled = useRadioStore((s) => s.markCloudUnsettled);
 
   // Tracks the uid we currently believe we're acting as. Used by the
   // auth-change subscriber to detect a true cross-device sign-in (uid
   // changes) vs an in-place anon→permanent upgrade (uid stays the same).
   const knownUidRef = useRef<string | null>(null);
+
+  // Bumped by every cloud step; a step is current only while the counter
+  // still holds the value it started with.
+  const cloudStepRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,10 +101,10 @@ export default function StoreHydrator({
       // 2. Bootstrap Supabase session (creates anon user on first visit).
       const user = await ensureAnonSession();
       if (cancelled) return;
+      const step = ++cloudStepRef.current;
+      const isCurrent = () => !cancelled && step === cloudStepRef.current;
       if (!user) {
-        // Local-only mode (Supabase unconfigured or sign-in failed): no
-        // cloud snapshot is coming, so the startup selection is final.
-        markCloudSettled();
+        await runCloudStep(null, isCurrent);
         return;
       }
       setUser(user);
@@ -53,60 +116,20 @@ export default function StoreHydrator({
         user.isAnonymous ? "(anonymous)" : "",
       );
 
-      // 3. Pull-or-seed: if the user has cloud data, pull it into the store
-      //    (cloud wins); otherwise push the local seed up as the initial
-      //    snapshot.
-      const cloud = await pullFromCloud(user.id);
+      // 3. Pull (or seed), repair, settle.
+      await runCloudStep(user.id, isCurrent);
       if (cancelled) return;
-      if (cloud) {
-        applyCloudSnapshot(cloud);
-        // eslint-disable-next-line no-console
-        console.log(
-          "[sync] pulled cloud snapshot:",
-          cloud.stations.length,
-          "stations,",
-          cloud.groups.length,
-          "groups",
-        );
-      } else {
-        const s = useRadioStore.getState();
-        await syncToCloud(user.id, {
-          stations: s.stations,
-          groups: s.groups,
-          memberships: s.memberships,
-          activeGroupId: s.activeGroupId,
-          currentStationId: s.currentStationId,
-          volume: s.volume,
-          version: CURRENT_VERSION,
-        });
-        // eslint-disable-next-line no-console
-        console.log("[sync] initial cloud seed complete");
-      }
 
-      // 4. Idempotent data repair: any seed-default band that exists in the
-      //    user's library but has zero memberships gets its seed memberships
-      //    restored. Runs after step 3 so it sees the truly active state
-      //    (cloud snapshot applied, or local seed pushed up). No-op when
-      //    every default band still has at least one station.
-      if (cancelled) return;
-      await restoreEmptySeedBands();
-
-      // 5. M23 — log a page_view event now that the session is established.
+      // 4. M23 — log a page_view event now that the session is established.
       //    Fires once per app mount; placed after session bootstrap so the
       //    event row gets the user's real uid attached.
       trackPageView();
-
-      // 6. Startup cloud work is done; the pull can no longer overwrite the
-      //    selection. useStationURL waits for this before committing a
-      //    ?station= cue, so shared links win over the snapshot's last
-      //    station (and the cue's cloud sync can't race the pull).
-      markCloudSettled();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [hydrate, setUser, applyCloudSnapshot, restoreEmptySeedBands, markCloudSettled]);
+  }, [hydrate, setUser]);
 
   // Subscribe to Supabase auth changes so the store stays in sync with the
   // live session. Fires on:
@@ -116,65 +139,70 @@ export default function StoreHydrator({
   //   - magic-link sign-in (M6) → uid changes from this device's anon to the
   //     existing permanent uid; we pull cloud and overwrite local state so
   //     the user's synced library replaces this device's guest library
-  //   - sign-out → clears user; next ensureAnonSession (on reload) mints a
-  //     fresh anon uid
+  //   - sign-out → mints a fresh anon uid and seeds its empty cloud from
+  //     this device's library
   //   - token refresh → refreshed user payload, no visible change
   //
   // Kept separate from the bootstrap effect so the subscription lifecycle is
   // independent of initial hydration (and doesn't get torn down if the
   // bootstrap deps somehow re-ran).
   useEffect(() => {
-    const unsubscribe = subscribeToAuthChanges(async (user) => {
+    const unsubscribe = subscribeToAuthChanges(async (user, event) => {
+      // The bootstrap effect resolves the initial session itself (and mints
+      // the anon user when there's none).
+      if (event === "INITIAL_SESSION") return;
+
       if (user) {
         const previousUid = knownUidRef.current;
-        setUser(user);
-        knownUidRef.current = user.id;
+        if (!previousUid || previousUid === user.id) {
+          setUser(user);
+          knownUidRef.current = user.id;
+          return;
+        }
 
         // True cross-device sign-in: uid changed. Pull the signed-in user's
         // library from cloud and overwrite this device's local state. The
         // prior anon uid's local data (and any rows it pushed under that
         // anon uid) is intentionally discarded — sign-in is overwrite, not
-        // merge.
-        if (previousUid && previousUid !== user.id) {
-          // eslint-disable-next-line no-console
-          console.log(
-            "[sync] auth uid changed",
-            previousUid,
-            "→",
-            user.id,
-            "— pulling cloud snapshot",
-          );
-          const cloud = await pullFromCloud(user.id);
-          if (cloud) {
-            applyCloudSnapshot(cloud);
-            // eslint-disable-next-line no-console
-            console.log(
-              "[sync] applied cloud snapshot:",
-              cloud.stations.length,
-              "stations,",
-              cloud.groups.length,
-              "groups",
-            );
-            // Re-run the empty-seed-band repair against the freshly pulled
-            // library — same rationale as on initial bootstrap.
-            await restoreEmptySeedBands();
-          }
-        }
+        // merge. Cloud syncs are held back first, so nothing persisted in
+        // the meantime can push this device's library into the account.
+        const step = ++cloudStepRef.current;
+        markCloudUnsettled();
+        setUser(user);
+        knownUidRef.current = user.id;
+        // eslint-disable-next-line no-console
+        console.log(
+          "[sync] auth uid changed",
+          previousUid,
+          "→",
+          user.id,
+          "— pulling cloud snapshot",
+        );
+        await runCloudStep(user.id, () => step === cloudStepRef.current);
         return;
       }
+
       // Sign-out fired. Mint a fresh anon session so the app keeps working
-      // as a guest without requiring a page reload. The new anon uid starts
-      // with an empty cloud slate — next schedulePersist will seed it.
+      // as a guest without requiring a page reload. Forget the old uid first
+      // so the fresh anon's SIGNED_IN isn't mistaken for a sign-in; its empty
+      // cloud then gets seeded from this device's library.
+      knownUidRef.current = null;
+      const step = ++cloudStepRef.current;
+      const isCurrent = () => step === cloudStepRef.current;
+      markCloudUnsettled();
       const fresh = await ensureAnonSession();
+      if (!isCurrent()) return;
       if (fresh) {
         setUser(fresh);
         knownUidRef.current = fresh.id;
+        await runCloudStep(fresh.id, isCurrent);
       } else {
-        knownUidRef.current = null;
+        setUser(null);
+        await runCloudStep(null, isCurrent);
       }
     });
     return unsubscribe;
-  }, [setUser, applyCloudSnapshot, restoreEmptySeedBands]);
+  }, [setUser, markCloudUnsettled]);
 
   // M23 — listening-time heartbeat. Fires every 60s while audio is actively
   // playing, recording the currently-tuned station. Total listening minutes
