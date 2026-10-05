@@ -10,6 +10,14 @@
 //   - Reads `?station=<id>` on mount and (if it resolves) cues that station
 //     without auto-playing. Real radios wake up off, plus browser autoplay
 //     policies would block sound-without-gesture anyway.
+//   - The cue is display-only until StoreHydrator's startup cloud pull
+//     settles (store.cloudSettled). The pulled snapshot carries the user's
+//     last-saved station and would otherwise bump returning visitors off the
+//     shared link a second after load. Once settled, the cue is re-applied
+//     if the snapshot moved it, then committed through setCurrentStation
+//     (persisted + logged as a 'url' tune). Deferring the persist also keeps
+//     the cue's cloud sync (delete-all-then-insert-all) from racing the pull,
+//     which could read the user's memberships mid-wipe.
 //   - On settle (currentStationId stable for 400ms), writes the new ID back
 //     to the URL via pushState. First write uses replaceState so the back
 //     button doesn't trap the user on the app's initial entry.
@@ -19,18 +27,35 @@
 // Out of scope:
 //   - Song info in title. NowPlayingLozenge keeps that as local state and
 //     it's only known on tap; not worth lifting for a transient decoration.
-//   - Band info in URL. Band is derived from station membership, same way
-//     scan does cross-band drift in store.setCurrentStation.
+//   - Band info in URL. Band is derived from station membership instead:
+//     cueing a station outside the active band switches to a band that
+//     holds it (bandToShow below), much like scan's cross-band drift.
 
 import { useEffect, useRef } from "react";
-import { useRadioStore } from "@/lib/store";
+import { useRadioStore, type RadioState } from "@/lib/store";
 
 const PARAM = "station";
 const DEFAULT_TITLE = "Your Internet Radio Dial";
 const SETTLE_MS = 400;
 
+// The dial only shows the active band, so cueing a station outside it would
+// leave the needle on another band's station. Returns the band to switch to
+// (the first by position that holds the station), or null when the active
+// band already holds it or no band does.
+function bandToShow(s: RadioState, stationId: string): string | null {
+  const bands = new Set(
+    s.memberships.filter((m) => m.stationId === stationId).map((m) => m.groupId),
+  );
+  if (s.activeGroupId && bands.has(s.activeGroupId)) return null;
+  const first = [...s.groups]
+    .sort((a, b) => a.position - b.position)
+    .find((g) => bands.has(g.id));
+  return first?.id ?? null;
+}
+
 export function useStationURL() {
   const hydrated = useRadioStore((s) => s.hydrated);
+  const cloudSettled = useRadioStore((s) => s.cloudSettled);
   const currentStationId = useRadioStore((s) => s.currentStationId);
   const stations = useRadioStore((s) => s.stations);
   const setCurrentStation = useRadioStore((s) => s.setCurrentStation);
@@ -40,6 +65,14 @@ export function useStationURL() {
   // entry on the very first render (when currentStationId hasn't actually
   // moved — it's just the hydrated default).
   const initialReadDoneRef = useRef(false);
+
+  // The ?station= id from the initial URL (null if absent), held from the
+  // initial read until the commit. `urlCuedRef` records whether the initial
+  // read actually moved the dial, as opposed to the URL just echoing the
+  // saved station (a reload). `urlCommitDoneRef` makes the commit one-shot.
+  const urlStationIdRef = useRef<string | null>(null);
+  const urlCuedRef = useRef(false);
+  const urlCommitDoneRef = useRef(false);
 
   // Tracks the last value we wrote to the URL so the writer can no-op when
   // currentStationId === lastWritten. Avoids rewriting the same URL on
@@ -54,21 +87,29 @@ export function useStationURL() {
 
   // --- Initial read: ?station=<id> on mount ---------------------------------
   // Runs once after hydration. If the param resolves to a station the user
-  // has, we cue it (no autoplay). If not, silent no-op — too niche to deserve
-  // a UI surface, and we don't want to surprise the user with a toast on a
-  // fresh load.
+  // has, we show it right away, but display-only: no persist, no analytics —
+  // the cloud pull may still be in flight. If not, silent no-op for now (the
+  // commit below re-checks against the pulled library) — too niche to
+  // deserve a UI surface, and we don't want to surprise the user with a
+  // toast on a fresh load.
   useEffect(() => {
     if (!hydrated || initialReadDoneRef.current) return;
     if (typeof window === "undefined") return;
 
     const params = new URLSearchParams(window.location.search);
     const wantId = params.get(PARAM);
-    if (wantId) {
-      const exists = stations.some((s) => s.id === wantId);
-      if (exists && wantId !== currentStationId) {
-        // autoplay=false — pre-tune only. User taps power to start.
-        setCurrentStation(wantId, false);
-      }
+    urlStationIdRef.current = wantId;
+    const s = useRadioStore.getState();
+    if (
+      wantId &&
+      wantId !== s.currentStationId &&
+      s.stations.some((st) => st.id === wantId)
+    ) {
+      const patch: Partial<RadioState> = { currentStationId: wantId };
+      const band = bandToShow(s, wantId);
+      if (band) patch.activeGroupId = band;
+      useRadioStore.setState(patch);
+      urlCuedRef.current = true;
     }
 
     // Whatever the URL had, the current store state is now authoritative.
@@ -76,7 +117,30 @@ export function useStationURL() {
     // rewrite the same URL on the next effect tick.
     lastWrittenIdRef.current = useRadioStore.getState().currentStationId;
     initialReadDoneRef.current = true;
-  }, [hydrated, stations, currentStationId, setCurrentStation]);
+  }, [hydrated]);
+
+  // --- Commit: once the startup cloud pull has settled ----------------------
+  // For returning visitors the snapshot has replaced currentStationId (and
+  // activeGroupId) with their last-saved values; re-apply the requested
+  // station if the pulled library has it. Skipped when the URL only echoes
+  // the station the user already had (e.g. a reload), so reloads don't log
+  // tunes.
+  useEffect(() => {
+    if (!cloudSettled || !initialReadDoneRef.current) return;
+    if (urlCommitDoneRef.current) return;
+    urlCommitDoneRef.current = true;
+
+    const wantId = urlStationIdRef.current;
+    if (!wantId) return;
+    const s = useRadioStore.getState();
+    if (!s.stations.some((st) => st.id === wantId)) return;
+    if (!urlCuedRef.current && s.currentStationId === wantId) return;
+
+    const band = bandToShow(s, wantId);
+    if (band) useRadioStore.setState({ activeGroupId: band });
+    // autoplay=false — pre-tune only. User taps power to start.
+    setCurrentStation(wantId, false, "url");
+  }, [cloudSettled, setCurrentStation]);
 
   // --- Title: synchronous, no debounce --------------------------------------
   useEffect(() => {

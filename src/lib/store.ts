@@ -42,6 +42,12 @@ export interface PlaybackState {
 export interface RadioState {
   hydrated: boolean;
 
+  // True once StoreHydrator's startup cloud step is over — snapshot applied,
+  // local seed pushed up, or no session to sync with. Until then the pull can
+  // still overwrite currentStationId/activeGroupId, so startup selection that
+  // must win over it (useStationURL's ?station= cue) waits for this.
+  cloudSettled: boolean;
+
   // auth — null until ensureAnonSession() resolves. Anonymous users get a
   // real Supabase uid here; email-signed-in users (M4.later) will swap to
   // isAnonymous: false. Sync writes are keyed off this uid.
@@ -102,6 +108,8 @@ export interface RadioState {
    * when the user has cloud data.
    */
   applyCloudSnapshot: (data: UserData) => void;
+  /** Flips `cloudSettled`. Called once by StoreHydrator at the end of startup. */
+  markCloudSettled: () => void;
 
   setActiveGroup: (id: string) => void;
   // M23: optional `source` parameter classifies the tune for analytics.
@@ -270,6 +278,7 @@ function stationsInGroup(
 
 export const useRadioStore = create<RadioState>((set, get) => ({
   hydrated: false,
+  cloudSettled: false,
   user: null,
 
   stations: seedStations,
@@ -426,6 +435,8 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     // we just read this state from cloud, no need to push it back.
     void saveUserData(data);
   },
+
+  markCloudSettled: () => set({ cloudSettled: true }),
 
   setActiveGroup: (id) => {
     if (get().activeGroupId === id) return;

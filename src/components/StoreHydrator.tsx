@@ -19,6 +19,7 @@ export default function StoreHydrator({
   const setUser = useRadioStore((s) => s.setUser);
   const applyCloudSnapshot = useRadioStore((s) => s.applyCloudSnapshot);
   const restoreEmptySeedBands = useRadioStore((s) => s.restoreEmptySeedBands);
+  const markCloudSettled = useRadioStore((s) => s.markCloudSettled);
 
   // Tracks the uid we currently believe we're acting as. Used by the
   // auth-change subscriber to detect a true cross-device sign-in (uid
@@ -36,7 +37,13 @@ export default function StoreHydrator({
 
       // 2. Bootstrap Supabase session (creates anon user on first visit).
       const user = await ensureAnonSession();
-      if (cancelled || !user) return;
+      if (cancelled) return;
+      if (!user) {
+        // Local-only mode (Supabase unconfigured or sign-in failed): no
+        // cloud snapshot is coming, so the startup selection is final.
+        markCloudSettled();
+        return;
+      }
       setUser(user);
       knownUidRef.current = user.id;
       // eslint-disable-next-line no-console
@@ -88,12 +95,18 @@ export default function StoreHydrator({
       //    Fires once per app mount; placed after session bootstrap so the
       //    event row gets the user's real uid attached.
       trackPageView();
+
+      // 6. Startup cloud work is done; the pull can no longer overwrite the
+      //    selection. useStationURL waits for this before committing a
+      //    ?station= cue, so shared links win over the snapshot's last
+      //    station (and the cue's cloud sync can't race the pull).
+      markCloudSettled();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [hydrate, setUser, applyCloudSnapshot, restoreEmptySeedBands]);
+  }, [hydrate, setUser, applyCloudSnapshot, restoreEmptySeedBands, markCloudSettled]);
 
   // Subscribe to Supabase auth changes so the store stays in sync with the
   // live session. Fires on:
