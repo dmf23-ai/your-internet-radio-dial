@@ -2,8 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { useRadioStore } from "@/lib/store";
-import { newDefaultStations, type BandPlacement } from "@/lib/lineup";
+import { useRadioStore, type DefaultsAdded } from "@/lib/store";
+import {
+  offerPhrase,
+  placementsPhrase,
+  useDefaultsOffer,
+} from "@/lib/useDefaultsOffer";
+import type { DefaultsOffer } from "@/lib/lineup";
 import type { Station, StreamType } from "@/data/seed";
 
 /**
@@ -18,8 +23,9 @@ import type { Station, StreamType } from "@/data/seed";
  *    same-origin, slight latency cost).
  *
  * Above both, for users who customized their library: a button that adds
- * the default stations added since their lineup (users who never customized
- * get new lineups automatically; see src/lib/lineup.ts).
+ * the default stations and bands added since their lineup (users who never
+ * customized get new lineups automatically; see src/lib/lineup.ts). The
+ * cabinet carries the same button (NewStationsPlaque).
  *
  * ESC or backdrop click closes.
  */
@@ -92,8 +98,6 @@ function inferStreamTypeFromUrl(rawUrl: string): StreamType {
 
 type AddMode = "search" | "url";
 
-type DefaultsAdded = { added: number; bands: BandPlacement[] };
-
 // How long the "Added N stations" confirmation stays up.
 const DEFAULTS_ADDED_MS = 8000;
 
@@ -121,21 +125,9 @@ export default function SearchOverlay() {
     }),
   );
 
-  // New default stations on offer: only for customized libraries, and only
-  // once the startup cloud step has settled (the pull can replace the
-  // library, and the reconcile resolves its markers).
-  const cloudSettled = useRadioStore((s) => s.cloudSettled);
-  const customizedAt = useRadioStore((s) => s.customizedAt);
-  const seedVersion = useRadioStore((s) => s.seedVersion);
-  const libraryStations = useRadioStore((s) => s.stations);
+  // New default stations and bands on offer (customized libraries only).
+  const offer = useDefaultsOffer();
   const addNewDefaultStations = useRadioStore((s) => s.addNewDefaultStations);
-  const newDefaultsCount = useMemo(
-    () =>
-      cloudSettled && customizedAt !== null && seedVersion !== null
-        ? newDefaultStations(libraryStations, seedVersion).length
-        : 0,
-    [cloudSettled, customizedAt, seedVersion, libraryStations],
-  );
   const [defaultsAdded, setDefaultsAdded] = useState<DefaultsAdded | null>(
     null,
   );
@@ -397,9 +389,9 @@ export default function SearchOverlay() {
             </button>
           </div>
 
-          {(newDefaultsCount > 0 || defaultsAdded) && (
+          {(offer || defaultsAdded) && (
             <NewDefaultsCallout
-              count={newDefaultsCount}
+              offer={offer}
               added={defaultsAdded}
               onAdd={handleAddDefaults}
             />
@@ -496,16 +488,15 @@ export default function SearchOverlay() {
 // --- New default stations (customized libraries only) ---
 
 function NewDefaultsCallout({
-  count,
+  offer,
   added,
   onAdd,
 }: {
-  count: number;
+  offer: DefaultsOffer | null;
   added: DefaultsAdded | null;
   onAdd: () => void;
 }) {
   if (added) {
-    const where = added.bands.map((b) => `${b.name} +${b.count}`).join(", ");
     return (
       <div className="px-4 pb-3">
         <p
@@ -517,12 +508,17 @@ function NewDefaultsCallout({
             color: "#cfe6a8",
           }}
         >
-          Added {added.added} station{added.added === 1 ? "" : "s"} from the
-          default lineup: <span className="text-brass-300">{where}</span>.
+          Added {offerPhrase(added.stations, added.bands)} from the default
+          lineup:{" "}
+          <span className="text-brass-300">
+            {placementsPhrase(added.placements)}
+          </span>
+          .
         </p>
       </div>
     );
   }
+  if (!offer) return null;
   return (
     <div className="px-4 pb-3">
       <div
@@ -535,7 +531,7 @@ function NewDefaultsCallout({
         <button
           type="button"
           onClick={onAdd}
-          className="self-start text-left font-display uppercase tracking-[0.2em] text-[11px] leading-snug rounded-md px-3 py-2 transition-transform active:translate-y-[1px]"
+          className="self-start text-left font-display uppercase tracking-[0.2em] text-[11px] leading-snug lining-nums rounded-md px-3 py-2 transition-transform active:translate-y-[1px]"
           style={{
             color: "#1a120a",
             background:
@@ -545,12 +541,15 @@ function NewDefaultsCallout({
               "inset 0 1px 2px rgba(255,240,200,0.6), 0 2px 3px rgba(0,0,0,0.5)",
           }}
         >
-          Add {count} new station{count === 1 ? "" : "s"} from the default
-          lineup
+          Add {offerPhrase(offer.stations.length, offer.bands.length)} from
+          the default lineup
         </button>
         <p className="text-[11px] leading-snug text-ivory-soft/60">
-          Added to the default lineup since your dial was set up. Each goes
-          into its usual band, or New Arrivals if that band is gone.
+          Added to the default lineup since your dial was set up. Each station
+          goes into its usual band, or New Arrivals if that band is gone.
+          {offer.bands.length > 0 &&
+            " A new band arrives complete, including any of its stations you already have."}{" "}
+          Nothing you have is moved or removed.
         </p>
       </div>
     </div>

@@ -16,6 +16,7 @@ import TonePanel from "./TonePanel";
 import DozePlaque from "./DozePlaque";
 import ScanButton from "./ScanButton";
 import NowPlayingLozenge from "./NowPlayingLozenge";
+import NewStationsPlaque from "./NewStationsPlaque";
 import { PowerButton, OnAirLamp } from "./Lamps";
 import { useRadioStore } from "@/lib/store";
 import { useStationURL } from "@/lib/useStationURL";
@@ -148,6 +149,11 @@ export default function Console() {
             Suggestion Box
           </div>
         </button>
+
+        {/* New-stations plaque — to the right of the Suggestion Box, only
+            while a customized library has default stations or bands to
+            add (the same offer as the search overlay's button). */}
+        <NewStationsPlaque />
 
         {/* POWER — mounted on the cabinet's upper-left corner, mirroring
             the "?" button on the upper-right. The brass-rimmed lamp sits

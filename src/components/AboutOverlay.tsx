@@ -130,7 +130,10 @@ export default function AboutOverlay() {
                 station to the next. On the cream ticker-tape beneath the
                 needle, you may also drag the station names left or right —
                 the needle stays fixed; the names roll beneath it. Click
-                any visible name to jump straight to it.
+                any visible name to jump straight to it. Between one
+                station and the next you&apos;ll hear a whisper of static,
+                just as on the sets of old, and the same hush fills any
+                moment the signal falters while the set finds it again.
               </Section>
 
               <Section title="The Station Card">
@@ -140,6 +143,19 @@ export default function AboutOverlay() {
                 and language, its bitrate and format, and a copy of its
                 stream address for the technically-minded. Press{" "}
                 <em className="italic">Esc</em> to return to your listening.
+                Should the words run too long for the pill, they scroll by
+                of their own accord — unless your device has asked for
+                reduced motion, in which case they hold still and you may
+                drag them sideways to read the rest.
+              </Section>
+
+              <Section title="Now Playing">
+                Directly beneath the dial hangs a brass plaque marked{" "}
+                <strong className="font-semibold">NOW PLAYING</strong>.
+                While a station is on the air, tap it and the set will lend
+                an ear for about eight seconds, then tell you the song and
+                its artist, if the tune is one it knows. Tap again whenever
+                the music changes.
               </Section>
 
               <Section title="The Volume Knob">
@@ -147,6 +163,16 @@ export default function AboutOverlay() {
                 volume. Turn it clockwise to raise the sound; counter-
                 clockwise to lower it. The needle on the meter beside it
                 rises and falls with the music itself.
+              </Section>
+
+              <Section title="The Tone Knobs">
+                Beneath the speaker grille, two small brass knobs shape the
+                sound: <strong className="font-semibold">BASS</strong> for
+                the low notes and{" "}
+                <strong className="font-semibold">TREBLE</strong> for the
+                high. Turn either up or down by as much as twelve decibels;
+                a gentle notch marks the middle, and a double-click returns
+                the knob there.
               </Section>
 
               <Section title="The On-Air Lamp">
@@ -220,6 +246,15 @@ export default function AboutOverlay() {
                 guest.
               </Section>
 
+              <Section title="Sharing a Station">
+                The address in your browser always names the station
+                you&apos;re tuned to, and the browser tab wears the
+                station&apos;s name. To share a station with a friend,
+                simply copy the address and send it along: the link opens
+                with that very station waiting on the dial. Press the power
+                switch to listen.
+              </Section>
+
               <Section title="Drift / Scan">
                 On the right of the speaker grille, the brass{" "}
                 <strong className="font-semibold">SCAN</strong> button
@@ -249,6 +284,34 @@ export default function AboutOverlay() {
                 through the slot — propose a station for the default
                 library, or share any other notion with the workshop. We
                 read every one.
+              </Section>
+
+              <Section title="New Stations from the Workshop">
+                From time to time the workshop adds stations to the default
+                lineup, and now and then a whole new band. If you have never
+                rearranged your dial, the new lineup simply arrives on your
+                next visit. If you have made the dial your own, nothing
+                changes without your say-so: a small brass plaque with a
+                glowing amber lamp appears beside the Suggestion Box, and
+                the same offer waits at the top of the Search. One press
+                adds each new station to its usual band, or to{" "}
+                <em className="italic">New Arrivals</em> should you have
+                retired that band. A brand-new band arrives complete, even
+                with stations you already keep elsewhere, and nothing you
+                have is moved, renamed or removed.
+              </Section>
+
+              <Section title="A Note for Safari and iPhone Listeners">
+                Apple&apos;s Safari — on the Mac, the iPhone and the iPad
+                alike — won&apos;t let a web page listen in on the music it
+                plays. So in Safari a few instruments rest, each marked
+                with a small note: the VU meter, the{" "}
+                <strong className="font-semibold">BASS</strong> and{" "}
+                <strong className="font-semibold">TREBLE</strong> knobs, and
+                the <strong className="font-semibold">NOW PLAYING</strong>{" "}
+                song finder. On an iPhone or iPad the volume knob rests too;
+                use the device&apos;s own volume buttons. The radio itself
+                plays just the same.
               </Section>
 
               <Section title="And That's the Whole of It">

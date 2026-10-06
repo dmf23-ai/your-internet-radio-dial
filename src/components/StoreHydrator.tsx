@@ -10,12 +10,12 @@ import { pullFromCloud } from "@/lib/supabase/sync";
 import { trackPageView, trackSessionHeartbeat } from "@/lib/analytics";
 
 /**
- * One cloud step: pull the account's library (cloud wins), repair it, then
- * settle, which releases the store's held-back cloud syncs. Runs at startup
- * and again whenever a sign-in switches the uid. `isCurrent` turns false
- * once a newer step (or an unmount) takes over; a stale step stops without
- * touching the store, so an overtaken pull can't land on top of a newer
- * account's library.
+ * One cloud step: pull the account's library (cloud wins), reconcile its
+ * lineup, then settle, which releases the store's held-back cloud syncs.
+ * Runs at startup and again whenever a sign-in switches the uid.
+ * `isCurrent` turns false once a newer step (or an unmount) takes over; a
+ * stale step stops without touching the store, so an overtaken pull can't
+ * land on top of a newer account's library.
  *
  * userId null = local-only mode (Supabase unconfigured or sign-in failed):
  * no snapshot is coming, so the local library is final as soon as it's here.
@@ -55,17 +55,10 @@ async function runCloudStep(
   // Lineup markers, and the move onto the current default lineup for a
   // library that was never customized. After the pull (which can replace the
   // library) and before settling, so useStationURL commits against the final
-  // library and the update reaches the cloud with the settle.
+  // library and the update reaches the cloud with the settle. An empty
+  // default band stays empty: since M25 made the sync atomic, it can only be
+  // a customizer's choice, so M14's refill of empty bands is gone.
   store().reconcileLineup();
-
-  if (userId) {
-    // Idempotent data repair: any seed-default band that exists in the
-    // user's library but has zero memberships gets its seed memberships
-    // restored. Runs after the pull so it sees the truly active state. No-op
-    // when every default band still has at least one station.
-    await store().restoreEmptySeedBands();
-    if (!isCurrent()) return;
-  }
 
   // The pull can no longer overwrite the selection, so useStationURL may
   // commit a ?station= cue now, and the cloud may hear about everything
@@ -124,7 +117,7 @@ export default function StoreHydrator({
         user.isAnonymous ? "(anonymous)" : "",
       );
 
-      // 3. Pull (or seed), repair, settle.
+      // 3. Pull (or seed), reconcile, settle.
       await runCloudStep(user.id, isCurrent);
       if (cancelled) return;
 

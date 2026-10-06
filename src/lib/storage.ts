@@ -30,11 +30,11 @@ const KEY = "yird:userData:v1";
 // The default-lineup version: bump it whenever seed.ts's lineup changes
 // (and record the new stations in src/data/seedHistory.ts). Users who never
 // customized their library are moved onto the new lineup on their next
-// visit; customizers are offered the new stations in the search overlay.
-// Until v13 a mismatch discarded the saved library, and the cloud pull then
-// put the old one straight back, so new defaults never reached returning
-// users.
-export const CURRENT_VERSION = 13;
+// visit; customizers are offered the new stations (and any new bands) on the
+// cabinet and in the search overlay. Until v13 a mismatch discarded the
+// saved library, and the cloud pull then put the old one straight back, so
+// new defaults never reached returning users.
+export const CURRENT_VERSION = 14;
 
 export async function loadUserData(): Promise<UserData | null> {
   if (typeof window === "undefined") return null;

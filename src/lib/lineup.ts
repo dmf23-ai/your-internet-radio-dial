@@ -1,6 +1,6 @@
 // Default-lineup reconciliation. Pure functions over a library; the store
 // wires them up (reconcileLineup at startup, addNewDefaultStations for the
-// search overlay's button).
+// "add new stations" button on the cabinet and in the search overlay).
 //
 // Every library carries two markers:
 //   seedVersion  — the default-lineup version it reflects (CURRENT_VERSION
@@ -10,7 +10,8 @@
 //                  null = never customized.
 // Users who never customized are moved onto each new lineup automatically.
 // Customizers keep their library and are offered the default stations added
-// after their seedVersion that they don't already have.
+// after their seedVersion that they don't already have, plus any default
+// band added after it that they don't have, complete with its stations.
 //
 // Why a version and not a time: "stations added since the user last saved a
 // customization" would hide every station added before an edit the user
@@ -55,6 +56,10 @@ export interface Selection {
 }
 
 export const NEW_ARRIVALS_BAND = "New Arrivals";
+
+// Band names match trimmed and case-insensitive (David's bands have non-seed
+// ids, so a default band is found by name when its id is missing).
+const nameKey = (name: string) => name.trim().toLowerCase();
 
 let currentFingerprint: string | null = null;
 
@@ -195,78 +200,133 @@ export function currentDefaultLineup(
 }
 
 /**
- * Default stations newer than the library's lineup that its stations don't
- * already include (by id or stream URL), in lineup order.
+ * Default bands newer than the library's lineup that it has no band for (by
+ * id or by name), in lineup order. The user never had them (rather than
+ * deleted them), so the button creates them, complete with their stations.
  */
-export function newDefaultStations(
-  stations: Station[],
+export function newDefaultBands(groups: Group[], seedVersion: number): Group[] {
+  const ids = new Set(groups.map((g) => g.id));
+  const names = new Set(groups.map((g) => nameKey(g.name)));
+  return [...seedGroups]
+    .sort((a, b) => a.position - b.position)
+    .filter(
+      (g) =>
+        bandAddedIn(g.id) > seedVersion &&
+        !ids.has(g.id) &&
+        !names.has(nameKey(g.name)) &&
+        seedMemberships.some((m) => m.groupId === g.id),
+    );
+}
+
+/** What the "add new stations" button would add to a customized library. */
+export interface DefaultsOffer {
+  /**
+   * Station records it lacks (by id or stream URL), in lineup order: the
+   * default stations newer than its lineup, plus any other station of a new
+   * band.
+   */
+  stations: Station[];
+  /** Default bands it would create (newDefaultBands). */
+  bands: Group[];
+}
+
+export function defaultsOffer(
+  lib: Pick<Library, "stations" | "groups">,
   seedVersion: number,
-): Station[] {
-  const index = ownedIndex(stations);
+): DefaultsOffer {
+  const bands = newDefaultBands(lib.groups, seedVersion);
+  const bandIds = new Set(bands.map((g) => g.id));
+  const inNewBand = new Set(
+    seedMemberships
+      .filter((m) => bandIds.has(m.groupId))
+      .map((m) => m.stationId),
+  );
+  const index = ownedIndex(lib.stations);
   const inBand = new Set(seedMemberships.map((m) => m.stationId));
   const offered = new Set<string>();
-  return seedStations.filter((s) => {
-    if (stationAddedIn(s.id) <= seedVersion || !inBand.has(s.id)) return false;
-    if (owns(index, s)) return false;
+  const stations = seedStations.filter((s) => {
+    if (stationAddedIn(s.id) <= seedVersion && !inNewBand.has(s.id)) {
+      return false;
+    }
+    if (!inBand.has(s.id) || owns(index, s)) return false;
     const key = normalizeStreamUrl(s.streamUrl);
     if (offered.has(key)) return false;
     offered.add(key);
     return true;
   });
+  return { stations, bands };
 }
 
 export interface BandPlacement {
   groupId: string;
   name: string;
+  /** Memberships the button added to the band. */
   count: number;
+  /** The button created the band (a new default band, or New Arrivals). */
+  created: boolean;
 }
 
 /**
- * Adds `stations` (from newDefaultStations) to the library. Each goes into
- * its default band(s), matched by band id, then by band name (trimmed,
- * case-insensitive). A default band the library lacks is created at the end
- * when it's newer than the library's lineup (`seedVersion`): the user never
- * had it. Otherwise they deleted it, and a station none of whose default
- * bands survives goes into a "New Arrivals" band, created at the end if
- * missing. New stations are appended in lineup order; existing positions
- * don't move.
+ * Adds an offer (from defaultsOffer) to the library. Append-only: nothing
+ * already there moves, and nothing is renamed or removed.
+ *  - A new default band is created at the end, complete: all its stations in
+ *    lineup order. Ones the library already has (by id, or by stream URL
+ *    under its own id) join it as an extra membership, so a station can then
+ *    sit in two bands; the rest arrive as new stations.
+ *  - Every other offered station goes into its default band(s), matched by
+ *    band id, then by band name. A station none of whose default bands
+ *    survives (the user deleted them) goes into a "New Arrivals" band,
+ *    created last (after any new default bands) if missing.
+ * New memberships are appended in lineup order.
  */
 export function placeDefaultStations(
   lib: Library,
-  stations: Station[],
-  seedVersion: number,
+  offer: DefaultsOffer,
   newGroupId: () => string,
 ): Library & { placements: BandPlacement[] } {
   const groups = [...lib.groups];
   const memberships = [...lib.memberships];
-  const libStations = [...lib.stations];
+  const stations = [...lib.stations];
 
-  const sortedBands = [...groups].sort((a, b) => a.position - b.position);
-  const nameKey = (name: string) => name.trim().toLowerCase();
   const byId = new Map(groups.map((g) => [g.id, g]));
   const byName = new Map<string, Group>();
-  for (const g of sortedBands) {
+  for (const g of [...groups].sort((a, b) => a.position - b.position)) {
     if (!byName.has(nameKey(g.name))) byName.set(nameKey(g.name), g);
   }
-  const seedBandById = new Map(seedGroups.map((g) => [g.id, g]));
-  // The user's band for a default band; "create" when it's newer than their
-  // lineup; null when they deleted it.
-  const resolveBand = (seedGroupId: string): Group | "create" | null => {
-    const own = byId.get(seedGroupId);
-    if (own) return own;
-    const seedBand = seedBandById.get(seedGroupId);
-    if (!seedBand) return null;
-    const named = byName.get(nameKey(seedBand.name));
-    if (named) return named;
-    return bandAddedIn(seedGroupId) > seedVersion ? "create" : null;
-  };
+  const created = new Set<string>();
   const addBand = (id: string, name: string): Group => {
     const band = { id, name, position: groups.length };
     groups.push(band);
     byId.set(id, band);
     byName.set(nameKey(name), band);
+    created.add(id);
     return band;
   };
+  const seedBandById = new Map(seedGroups.map((g) => [g.id, g]));
+  const newBands = new Set(offer.bands.map((g) => g.id));
+  // The library's band for an existing default band; null when the user
+  // deleted it.
+  const resolveBand = (seedGroupId: string): Group | null => {
+    const seedBand = seedBandById.get(seedGroupId);
+    if (!seedBand) return null;
+    return byId.get(seedGroupId) ?? byName.get(nameKey(seedBand.name)) ?? null;
+  };
+
+  // Add the offered records, then index every record by stream, so a new
+  // band's stations join under the record the library already holds.
+  const ids = new Set(stations.map((s) => s.id));
+  for (const s of offer.stations) {
+    if (ids.has(s.id)) continue;
+    stations.push(s);
+    ids.add(s.id);
+  }
+  const byStream = new Map<string, string>();
+  for (const s of stations) {
+    const key = normalizeStreamUrl(s.streamUrl);
+    if (!byStream.has(key)) byStream.set(key, s.id);
+  }
+  const heldAs = (s: Station): string | null =>
+    ids.has(s.id) ? s.id : byStream.get(normalizeStreamUrl(s.streamUrl)) ?? null;
 
   const counts = new Map<string, number>();
   const append = (stationId: string, group: Group) => {
@@ -282,47 +342,63 @@ export function placeDefaultStations(
     counts.set(group.id, (counts.get(group.id) ?? 0) + 1);
   };
 
-  let arrivals: Group | null = byName.get(nameKey(NEW_ARRIVALS_BAND)) ?? null;
-  const wanted = new Set(stations.map((s) => s.id));
+  const offered = new Set(offer.stations.map((s) => s.id));
+  const seedStationById = new Map(seedStations.map((s) => [s.id, s]));
+  // Offered stations with nowhere to go: none of their default bands is in
+  // the library or new to it.
+  const homeless = new Set(
+    offer.stations
+      .filter(
+        (s) =>
+          !seedMemberships.some(
+            (m) =>
+              m.stationId === s.id &&
+              (newBands.has(m.groupId) || resolveBand(m.groupId)),
+          ),
+      )
+      .map((s) => s.id),
+  );
   // Lineup order: band by band, each band's stations by position.
   const seedOrder = [...seedMemberships].sort((a, b) => {
     const ga = seedBandById.get(a.groupId)?.position ?? 0;
     const gb = seedBandById.get(b.groupId)?.position ?? 0;
     return ga - gb || a.position - b.position;
   });
-  const homeless = new Set(
-    stations
-      .filter(
-        (s) =>
-          !seedMemberships.some(
-            (m) => m.stationId === s.id && resolveBand(m.groupId),
-          ),
-      )
-      .map((s) => s.id),
-  );
+  const arrivals: string[] = [];
   for (const m of seedOrder) {
-    if (!wanted.has(m.stationId)) continue;
+    if (newBands.has(m.groupId)) {
+      const band =
+        byId.get(m.groupId) ??
+        addBand(m.groupId, seedBandById.get(m.groupId)!.name);
+      const seedStation = seedStationById.get(m.stationId);
+      const id = seedStation ? heldAs(seedStation) : null;
+      if (id) append(id, band);
+      continue;
+    }
+    if (!offered.has(m.stationId)) continue;
     if (homeless.has(m.stationId)) {
-      arrivals ??= addBand(newGroupId(), NEW_ARRIVALS_BAND);
-      append(m.stationId, arrivals);
+      if (!arrivals.includes(m.stationId)) arrivals.push(m.stationId);
       continue;
     }
     const band = resolveBand(m.groupId);
-    if (band === "create") {
-      append(m.stationId, addBand(m.groupId, seedBandById.get(m.groupId)!.name));
-    } else if (band) {
-      append(m.stationId, band);
-    }
+    if (band) append(m.stationId, band);
   }
-
-  const libIds = new Set(libStations.map((s) => s.id));
-  for (const s of stations) {
-    if (!libIds.has(s.id)) libStations.push(s);
+  // New Arrivals last, after any new default bands.
+  if (arrivals.length > 0) {
+    const band =
+      byName.get(nameKey(NEW_ARRIVALS_BAND)) ??
+      addBand(newGroupId(), NEW_ARRIVALS_BAND);
+    for (const id of arrivals) append(id, band);
   }
 
   const placements = [...groups]
     .sort((a, b) => a.position - b.position)
     .filter((g) => counts.has(g.id))
-    .map((g) => ({ groupId: g.id, name: g.name, count: counts.get(g.id)! }));
-  return { stations: libStations, groups, memberships, placements };
+    .map((g) => ({
+      groupId: g.id,
+      name: g.name,
+      count: counts.get(g.id)!,
+      created: created.has(g.id),
+    }));
+  return { stations, groups, memberships, placements };
 }

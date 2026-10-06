@@ -127,6 +127,31 @@ body {
   to   { transform: translateX(-50%); }
 }
 
+/* Slot for the cabinet's "add new stations" plaque (NewStationsPlaque): to
+   the right of the Suggestion Box (144px wide, centered), centered in the
+   gap before the "?" button (40px, 12px from the right edge; 16px from sm)
+   but never more than 18px from the Suggestion Box. The plaque is 124px
+   wide; below 568px a 32px badge stands in, and below 352px there's no room
+   at all (the search overlay still makes the offer). */
+.new-stations-slot {
+  left: calc(50% + 72px + clamp(2px, (50% - 156px) / 2, 18px));
+}
+@media (max-width: 351px) {
+  .new-stations-slot {
+    display: none;
+  }
+}
+@media (min-width: 568px) {
+  .new-stations-slot {
+    left: calc(50% + 72px + clamp(6px, (50% - 248px) / 2, 18px));
+  }
+}
+@media (min-width: 640px) {
+  .new-stations-slot {
+    left: calc(50% + 72px + clamp(6px, (50% - 252px) / 2, 18px));
+  }
+}
+
 /* Amber lamp glow behind dial */
 .amber-glow {
   box-shadow:

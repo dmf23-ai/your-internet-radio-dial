@@ -16,7 +16,11 @@
 //      seedGroups / seedMemberships) so its users are checked too.
 //
 // Backfilled 2026-10-05 from the git history of seed.ts: v9 be62413 (dev
-// only, pre-launch), v10 1d485a0 (M9), v11 a5dd5dd, v12 31096da.
+// only, pre-launch), v10 1d485a0 (M9), v11 a5dd5dd, v12 31096da, v13
+// 883ccad. v14 (2026-10-05) is David's cloud library: Puerto Rico, KCRW
+// Eclectic24 and the old KFJC stream left the lineup (their entries are
+// gone from the maps below), "Jazz" became "Jazz-Funk-Soul", and FM USA
+// arrived with five new stations.
 
 import type { Group, Membership } from "@/data/seed";
 import { CURRENT_VERSION } from "@/lib/storage";
@@ -80,8 +84,6 @@ export const STATION_ADDED_IN: Record<string, number> = {
   "rb-961e6cac-0601-11e8-ae97-52543be04c81": 10,
   "rb-9634ab94-0601-11e8-ae97-52543be04c81": 10,
   "rb-325a61dc-fe34-48c6-ae82-1467b710f07b": 10,
-  "kcrw-eclectic24": 10,
-  "rb-6f749ff6-d587-11e9-a861-52543be04c81": 10,
   "rb-961249b2-0601-11e8-ae97-52543be04c81": 10,
   "rb-434e9a4b-018a-4557-8ca1-8c328bb1e09d": 10,
   "url-the-worm": 10,
@@ -90,10 +92,6 @@ export const STATION_ADDED_IN: Record<string, number> = {
   "rb-9ceb61e8-5101-11e9-a4d7-52543be04c81": 11,
   "rb-9618344a-0601-11e8-ae97-52543be04c81": 11,
   "rb-c31977d2-91a7-4695-a842-ad3967aaa51c": 11,
-  "url-waba-aguadilla": 11,
-  "url-wael-maricao": 11,
-  "url-wcmn-arecibo": 11,
-  "url-wiob-mayaguez": 11,
   "rb-960a4ad1-0601-11e8-ae97-52543be04c81": 11,
   "rb-64a0b49e-f5f9-446c-9883-493f7a8889c9": 11,
   "rb-960a0f41-0601-11e8-ae97-52543be04c81": 11,
@@ -123,22 +121,29 @@ export const STATION_ADDED_IN: Record<string, number> = {
   "rb-360bb528-cea3-4e8e-84c6-3970c55bda71": 12,
   // v13: from David's library (2026-10-05).
   "rb-a5613717-c60b-4952-bb9c-a79d2063c96f": 13,
+  // v14: David's library as the lineup (2026-10-05), new in its FM USA band.
+  "rb-0281ef6c-6f42-11e8-83fa-52543be04c81": 14,
+  "rb-b30e1b15-6f23-434c-9d42-e2ee46e78eec": 14,
+  "rb-fa3002fd-59c7-4df3-b2f4-9700d6f1ba11": 14,
+  "rb-694bc694-cd35-4224-b622-630b735af327": 14,
+  "rb-f34ae431-42cd-4ef1-8a24-f4eca8a70cc1": 14,
 };
 
 /**
  * Lineup version each default band first shipped in. A band newer than a
- * user's lineup is one they never had (rather than one they deleted), so its
- * new stations bring the band along instead of landing in "New Arrivals".
+ * user's lineup is one they never had (rather than one they deleted), so the
+ * button creates it, complete with all its stations, instead of sending its
+ * new stations to "New Arrivals".
  */
 export const BAND_ADDED_IN: Record<string, number> = {
   "g-favorites": 10,
   "g-austin": 10,
-  "g-jazz": 10,
+  "g-jazz": 10, // "Jazz" until v14, then "Jazz-Funk-Soul"
   "g-news": 10,
   "g-ambient": 10,
   "g-world": 10,
   "g-exploratorium": 10,
-  "g-puerto-rico": 11,
+  "g-fm-usa": 14,
 };
 
 /**
@@ -151,6 +156,7 @@ export const PAST_LINEUP_FINGERPRINTS: Record<number, string> = {
   10: "026810f1114eaa",
   11: "0e99b7353725aa",
   12: "078c062554b838",
+  13: "12c2e00a4e67ac",
 };
 
 export function stationAddedIn(stationId: string): number {

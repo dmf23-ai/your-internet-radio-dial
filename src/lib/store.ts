@@ -23,7 +23,7 @@ import { syncToCloud } from "@/lib/supabase/sync";
 import { trackStationTune } from "@/lib/analytics";
 import {
   currentDefaultLineup,
-  newDefaultStations,
+  defaultsOffer,
   placeDefaultStations,
   resolveLineupMarkers,
   type BandPlacement,
@@ -44,6 +44,13 @@ export interface PlaybackState {
   status: AudioStatus;
   meterAvailable: boolean;
   errorMessage?: string;
+}
+
+/** What the "add new stations" button added, and where it went. */
+export interface DefaultsAdded {
+  stations: number;
+  bands: number;
+  placements: BandPlacement[];
 }
 
 export interface RadioState {
@@ -108,14 +115,6 @@ export interface RadioState {
 
   // --- actions ---
   hydrate: () => Promise<void>;
-  /**
-   * Idempotent data repair: any seed-default group that exists in the user's
-   * library but has zero memberships gets its seed memberships restored
-   * (and any missing seed stations re-added). Cheap no-op when nothing is
-   * empty. Called after hydration and after any cloud snapshot is applied
-   * — guards against a corrupted/partial sync that left a default band bare.
-   */
-  restoreEmptySeedBands: () => Promise<void>;
   setUser: (u: AppUser | null) => void;
   /**
    * Replace the local data slices with a cloud snapshot and persist to
@@ -146,12 +145,14 @@ export interface RadioState {
    */
   reconcileLineup: () => void;
   /**
-   * The search overlay's button: adds every default station newer than the
-   * user's lineup that they don't have yet, each into its default band (or
-   * "New Arrivals"), and marks the library current. Returns where they went,
-   * or null when there was nothing to add.
+   * The "add new stations" button (cabinet and search overlay): adds what
+   * defaultsOffer finds — every default station newer than the user's
+   * lineup that they don't have yet, each into its default band (or "New
+   * Arrivals"), and every default band newer than it that they don't have,
+   * complete — and marks the library current. Returns what went where, or
+   * null when there was nothing to add.
    */
-  addNewDefaultStations: () => { added: number; bands: BandPlacement[] } | null;
+  addNewDefaultStations: () => DefaultsAdded | null;
 
   setActiveGroup: (id: string) => void;
   // M23: optional `source` parameter classifies the tune for analytics.
@@ -441,70 +442,6 @@ export const useRadioStore = create<RadioState>((set, get) => ({
     set({ hydrated: true });
   },
 
-  restoreEmptySeedBands: async () => {
-    const state = get();
-    const seedGroupIds = new Set(seedGroups.map((g) => g.id));
-    const userGroupIds = new Set(state.groups.map((g) => g.id));
-    const memberCountByGroup = new Map<string, number>();
-    for (const m of state.memberships) {
-      memberCountByGroup.set(
-        m.groupId,
-        (memberCountByGroup.get(m.groupId) ?? 0) + 1,
-      );
-    }
-
-    // Empty seed-default groups that still exist in the user's library.
-    const targetGroupIds = [...seedGroupIds].filter(
-      (gid) =>
-        userGroupIds.has(gid) && (memberCountByGroup.get(gid) ?? 0) === 0,
-    );
-
-    if (targetGroupIds.length === 0) return;
-
-    const stationMap = new Map(state.stations.map((s) => [s.id, s]));
-    const seedStationMap = new Map(seedStations.map((s) => [s.id, s]));
-    const newStations = [...state.stations];
-    const newMemberships = [...state.memberships];
-    let restored = 0;
-
-    for (const gid of targetGroupIds) {
-      const seedRows = seedMemberships
-        .filter((m) => m.groupId === gid)
-        .sort((a, b) => a.position - b.position);
-      seedRows.forEach((row, idx) => {
-        // Add station if missing.
-        if (!stationMap.has(row.stationId)) {
-          const seedStation = seedStationMap.get(row.stationId);
-          if (seedStation) {
-            newStations.push(seedStation);
-            stationMap.set(seedStation.id, seedStation);
-          } else {
-            return; // unreferenced — skip
-          }
-        }
-        newMemberships.push({
-          stationId: row.stationId,
-          groupId: gid,
-          position: idx,
-        });
-        restored += 1;
-      });
-    }
-
-    set({ stations: newStations, memberships: newMemberships });
-    schedulePersist(get);
-
-    // eslint-disable-next-line no-console
-    console.log(
-      "[restore] re-populated",
-      restored,
-      "memberships across",
-      targetGroupIds.length,
-      "empty seed band(s):",
-      targetGroupIds.join(", "),
-    );
-  },
-
   setUser: (u) => set({ user: u }),
 
   applyCloudSnapshot: (data) => {
@@ -591,9 +528,9 @@ export const useRadioStore = create<RadioState>((set, get) => ({
   addNewDefaultStations: () => {
     const s = get();
     if (s.seedVersion === null) return null;
-    const offer = newDefaultStations(s.stations, s.seedVersion);
-    if (offer.length === 0) return null;
-    const placed = placeDefaultStations(s, offer, s.seedVersion, newGroupId);
+    const offer = defaultsOffer(s, s.seedVersion);
+    if (offer.stations.length === 0 && offer.bands.length === 0) return null;
+    const placed = placeDefaultStations(s, offer, newGroupId);
     set({
       stations: placed.stations,
       groups: placed.groups,
@@ -601,7 +538,11 @@ export const useRadioStore = create<RadioState>((set, get) => ({
       seedVersion: CURRENT_VERSION,
     });
     schedulePersist(get);
-    return { added: offer.length, bands: placed.placements };
+    return {
+      stations: offer.stations.length,
+      bands: offer.bands.length,
+      placements: placed.placements,
+    };
   },
 
   setActiveGroup: (id) => {

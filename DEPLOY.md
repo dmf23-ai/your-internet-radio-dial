@@ -236,4 +236,4 @@ Click **Create webhook**.
 | Site loads but stations all show "Signal Lost" | Env vars not set on Vercel, or stream proxy hitting CORS | Verify env vars; check Vercel Logs for `/api/stream` errors. |
 | Magic-link email opens localhost | Site URL not updated in Supabase | Part 4.1 — set Site URL to Vercel domain. |
 | Suggestion box submits succeed but no email | Webhook misconfigured or Resend key wrong | Part 5.5 — check webhook logs in Supabase. |
-| "Around the World" / "Exploratorium" still empty | New `restoreEmptySeedBands` repair didn't run yet | Hard-refresh the production site once. The repair runs on hydrate. |
+| A default band (e.g. "Around the World") is empty | Since M25 the sync is atomic, so this is the user's own doing; M14's `restoreEmptySeedBands` refill was removed in M27 so a deliberately emptied band stays empty | Add stations back via the Search, or press the "add new stations" plaque if a newer lineup is on offer. |
